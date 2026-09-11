@@ -1,0 +1,26 @@
+{
+  "host": "127.0.0.1",
+  "port": 8788,
+  "apiKey": "请填你自己的本地密钥（仅本机使用，随便一串即可）",
+  "defaultModel": "deepseek-v4-pro",
+  "defaultMaxTokens": 16384,
+  "stripFields": [],
+  "upstream": {
+    "apiBase": "https://copilot.tencent.com",
+    "billingBase": "https://www.codebuddy.cn",
+    "userAgent": "CLI/2.63.2 CodeBuddy/2.63.2",
+    "origin": "https://www.codebuddy.cn"
+  },
+  "timeouts": {
+    "headerMs": 90000,
+    "idleMs": 300000
+  },
+  "models": [
+    { "id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro" },
+    { "id": "deepseek-v4.1-flash", "name": "DeepSeek-V4.1-Flash" },
+    { "id": "glm-5.3", "name": "GLM-5.3" },
+    { "id": "kimi-k2.7", "name": "Kimi-K2.7-Code" },
+    { "id": "auto", "name": "Auto（上游自动路由）" }
+  ],
+  "modelAliases": {}
+}
