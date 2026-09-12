@@ -3,6 +3,7 @@
 import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
 import { resolveTarget, mergedModels, parseMultiplier } from './router.mjs';
+import { recordUsage } from './usage.mjs';
 import { startSSE, writeSSE, sendJson, sendError, estimateTokens } from './util.mjs';
 import { requestLog, warn } from './log.mjs';
 
@@ -55,6 +56,8 @@ export async function handleChatCompletions(ctx) {
   const wantsStream = body.stream === true;
   const started = Date.now();
   let ttfb = null;
+  let tools = 0;
+  let contentChars = 0;
 
   const upstreamBody = { ...body, model };
   if (upstreamBody.max_tokens === undefined && upstreamBody.max_completion_tokens === undefined) {
@@ -71,6 +74,7 @@ export async function handleChatCompletions(ctx) {
     startSSE(res, { 'X-Service': 'workbuddy-proxy', 'X-Upstream-Site': site });
     let valid = 0;
     let finished = false;
+    let upstreamUsage = null;
     try {
       for await (const payload of up.frames) {
         const parsed = classifyFrame(payload);
@@ -79,8 +83,11 @@ export async function handleChatCompletions(ctx) {
           break;
         }
         if (parsed.kind !== 'chunk') continue;
+        if (parsed.obj.usage) upstreamUsage = parsed.obj.usage;
+        if (parsed.obj.choices?.[0]?.delta?.tool_calls) tools++;
         if (ttfb === null) ttfb = Date.now() - started;
         valid++;
+        if (parsed.obj.choices?.[0]?.delta?.content) contentChars += parsed.obj.choices[0].delta.content.length;
         await writeSSE(res, JSON.stringify(normalizeChunk(parsed.obj, publicModel)));
       }
       if (valid === 0) {
@@ -99,6 +106,17 @@ export async function handleChatCompletions(ctx) {
         ttfb_ms: ttfb ?? '-',
         ms: Date.now() - started,
         frames: valid,
+      });
+      recordUsage({
+        site,
+        model,
+        mode: 'stream',
+        status: finished ? 200 : 499,
+        promptTokens: upstreamUsage?.prompt_tokens ?? estimateTokens(JSON.stringify(body.messages || [])),
+        completionTokens: upstreamUsage?.completion_tokens ?? estimateTokens('x'.repeat(contentChars)),
+        credit: upstreamUsage?.credit ?? 0,
+        ms: Date.now() - started,
+        tools,
       });
     }
     return;
@@ -170,6 +188,18 @@ export async function handleChatCompletions(ctx) {
     prompt: usage.prompt_tokens,
     completion: usage.completion_tokens,
     tools: agg.toolCallList.length || undefined,
+  });
+
+  recordUsage({
+    site,
+    model,
+    mode: 'json',
+    status: 200,
+    promptTokens: usage.prompt_tokens,
+    completionTokens: usage.completion_tokens,
+    credit: usage.credit ?? 0,
+    ms: Date.now() - started,
+    tools: agg.toolCallList.length,
   });
 
   sendJson(res, 200, {

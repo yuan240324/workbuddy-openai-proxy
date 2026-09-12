@@ -3,6 +3,7 @@
 import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
 import { resolveTarget } from './router.mjs';
+import { recordUsage } from './usage.mjs';
 import { startSSE, writeSSEEvent, sendJson, sendError, writeAsync, estimateTokens } from './util.mjs';
 import { requestLog, warn } from './log.mjs';
 
@@ -175,6 +176,17 @@ export async function handleMessages(ctx) {
       content.push({ type: 'tool_use', id: tc.id || newId('toolu'), name: tc.function.name, input: parseArgs(tc.function.arguments) });
     }
     requestLog({ site, model, mode: 'anthropic-json', status: 200, ms: Date.now() - started });
+    recordUsage({
+      site,
+      model,
+      mode: 'anthropic-json',
+      status: 200,
+      promptTokens: agg.usage?.prompt_tokens ?? estimateTokens(JSON.stringify(body.messages || [])),
+      completionTokens: agg.usage?.completion_tokens ?? estimateTokens(agg.content),
+      credit: agg.usage?.credit ?? 0,
+      ms: Date.now() - started,
+      tools: agg.toolCallList.length,
+    });
     return sendJson(res, 200, {
       id: newId('msg'),
       type: 'message',
@@ -294,6 +306,17 @@ export async function handleMessages(ctx) {
     up.close();
     if (!res.writableEnded) res.end();
     requestLog({ site, model, mode: 'anthropic-stream', status: closed ? 502 : 200, ms: Date.now() - started, blocks: nextBlock });
+    recordUsage({
+      site,
+      model,
+      mode: 'anthropic-stream',
+      status: closed ? 502 : 200,
+      promptTokens: usage?.prompt_tokens ?? estimateTokens(JSON.stringify(body.messages || [])),
+      completionTokens: usage?.completion_tokens ?? Math.max(1, Math.ceil(textLen / 3)),
+      credit: usage?.credit ?? 0,
+      ms: Date.now() - started,
+      tools: toolBlocks.size,
+    });
   }
 }
 

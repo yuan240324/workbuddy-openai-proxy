@@ -2,6 +2,7 @@
 auth.json
 auth.*.json
 config.json
+usage.json
 .login-state.json
 .gh-token
 node_modules/
