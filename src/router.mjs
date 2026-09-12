@@ -66,9 +66,14 @@ function splitPrefix(cfg, raw) {
 
 /** 解析请求里的模型 → { site, model, requested }。 */
 export async function resolveTarget(cfg, requestedModel) {
-  const raw = String(requestedModel || '').trim();
+  let raw = String(requestedModel || '').trim();
   const sites = siteKeys(cfg);
-  if (!raw) return { site: cfg.defaultSite, model: cfg.defaultModel, requested: cfg.defaultModel };
+  if (!raw) raw = cfg.defaultModel;
+
+  // 0) 特殊别名：客户端只配一个 `default` 模型，之后切换模型全在控制台完成
+  if (raw.toLowerCase() === 'default' || raw.toLowerCase() === 'current') {
+    raw = cfg.modelAliases?.[raw] || cfg.defaultModel;
+  }
 
   // 1) 显式站点前缀：intl-cli/glm-5.3、cn-cli/hy3
   const direct = splitPrefix(cfg, raw);
