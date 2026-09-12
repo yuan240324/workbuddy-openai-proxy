@@ -2,25 +2,67 @@
   "host": "127.0.0.1",
   "port": 8788,
   "apiKey": "请填你自己的本地密钥（仅本机使用，随便一串即可）",
+  "defaultSite": "cn-cli",
   "defaultModel": "deepseek-v4-pro",
   "defaultMaxTokens": 16384,
   "stripFields": [],
-  "upstream": {
-    "apiBase": "https://copilot.tencent.com",
-    "billingBase": "https://www.codebuddy.cn",
-    "userAgent": "CLI/2.63.2 CodeBuddy/2.63.2",
-    "origin": "https://www.codebuddy.cn"
+  "sites": {
+    "cn-cli": {
+      "label": "国内版 CLI（copilot.tencent.com）",
+      "enabled": true,
+      "apiBase": "https://copilot.tencent.com",
+      "billingBase": "https://www.codebuddy.cn",
+      "origin": "https://www.codebuddy.cn",
+      "userAgent": "CLI/2.63.2 CodeBuddy/2.63.2",
+      "product": "SaaS"
+    },
+    "intl-cli": {
+      "label": "国际版 CLI（codebuddy.ai）",
+      "enabled": true,
+      "apiBase": "https://www.codebuddy.ai",
+      "billingBase": "https://www.codebuddy.ai",
+      "origin": "https://www.codebuddy.ai",
+      "userAgent": "CLI/2.63.2 CodeBuddy/2.63.2",
+      "product": "SaaS",
+      "seedModels": [
+        { "id": "auto", "name": "Auto（上游自动路由）" },
+        { "id": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6" },
+        { "id": "claude-opus-4.6", "name": "Claude Opus 4.6" },
+        { "id": "gpt-5.4", "name": "GPT-5.4" },
+        { "id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro" },
+        { "id": "deepseek-v4.1-flash", "name": "DeepSeek-V4.1-Flash" },
+        { "id": "glm-5.3", "name": "GLM-5.3" },
+        { "id": "glm-5.2", "name": "GLM-5.2" },
+        { "id": "kimi-k2.7", "name": "Kimi-K2.7-Code" },
+        { "id": "minimax-m3", "name": "MiniMax-M3" }
+      ]
+    },
+    "intl-work": {
+      "label": "国际版 WorkBuddy（workbuddy.ai）",
+      "enabled": true,
+      "apiBase": "https://www.workbuddy.ai",
+      "billingBase": "https://www.workbuddy.ai",
+      "origin": "https://www.workbuddy.ai",
+      "userAgent": "CLI/2.63.2 CodeBuddy/2.63.2",
+      "product": "SaaS",
+      "seedModels": [{ "id": "auto", "name": "Auto（上游自动路由）" }]
+    }
+  },
+  "modelRoutes": {},
+  "modelAliases": {
+    "claude": "intl-cli/claude-sonnet-4.6",
+    "fast": "hy3"
   },
   "timeouts": {
     "headerMs": 90000,
     "idleMs": 300000
   },
   "models": [
-    { "id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro" },
+    { "id": "hy3", "name": "Hy3" },
     { "id": "deepseek-v4.1-flash", "name": "DeepSeek-V4.1-Flash" },
+    { "id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro" },
     { "id": "glm-5.3", "name": "GLM-5.3" },
     { "id": "kimi-k2.7", "name": "Kimi-K2.7-Code" },
     { "id": "auto", "name": "Auto（上游自动路由）" }
-  ],
-  "modelAliases": {}
+  ]
 }

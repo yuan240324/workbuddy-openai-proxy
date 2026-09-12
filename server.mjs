@@ -3,8 +3,8 @@
 //   - Anthropic 兼容：/v1/messages、/v1/messages/count_tokens
 // 仅供本机（默认 127.0.0.1）使用，不读写本项目目录以外的任何文件。
 import http from 'node:http';
-import { loadConfig, paths } from './src/config.mjs';
-import { loadAuth, getAuth, isLoggedIn } from './src/auth.mjs';
+import { loadConfig, paths, siteKeys } from './src/config.mjs';
+import { getAuth, isLoggedIn } from './src/auth.mjs';
 import { handleChatCompletions, handleModels } from './src/openai.mjs';
 import { handleMessages, handleCountTokens } from './src/anthropic.mjs';
 import { queryCredit } from './src/upstream.mjs';
@@ -12,7 +12,22 @@ import { readJsonBody, sendJson, sendError } from './src/util.mjs';
 import { log, warn, error } from './src/log.mjs';
 
 const cfg = loadConfig();
-loadAuth();
+
+/** 汇总各站点登录状态。 */
+function siteState(cfgIn) {
+  return siteKeys(cfgIn).map((site) => {
+    const a = getAuth(site);
+    return {
+      site,
+      label: cfgIn.sites[site].label,
+      apiBase: cfgIn.sites[site].apiBase,
+      logged_in: isLoggedIn(site),
+      uid: a.uid ? String(a.uid).slice(0, 8) + '…' : null,
+      nickname: a.nickname || null,
+      token_expires_at: a.expiresAt ? new Date(a.expiresAt).toISOString() : null,
+    };
+  });
+}
 
 function clientKey(req) {
   const auth = req.headers.authorization || '';
@@ -46,14 +61,12 @@ const server = http.createServer(async (req, res) => {
   try {
     // 无需鉴权：健康检查
     if (pathname === '/health' || pathname === '/healthz') {
-      const a = getAuth();
+      const sites = siteState(cfg);
       return sendJson(res, 200, {
-        status: isLoggedIn() ? 'ok' : 'not_logged_in',
+        status: sites.some((s) => s.logged_in) ? 'ok' : 'not_logged_in',
         service: 'workbuddy-proxy',
-        upstream: cfg.upstream.apiBase,
-        logged_in: isLoggedIn(),
-        uid: a.uid ? String(a.uid).slice(0, 8) + '…' : null,
-        token_expires_at: a.expiresAt ? new Date(a.expiresAt).toISOString() : null,
+        sites,
+        logged_in: sites.some((s) => s.logged_in),
       });
     }
 
@@ -62,30 +75,44 @@ const server = http.createServer(async (req, res) => {
       return sendError(res, 401, 'API Key 不正确：请在请求头携带 Authorization: Bearer <config.json 里的 apiKey>', 'invalid_api_key');
     }
 
-    if (pathname === '/' ) {
+    if (pathname === '/') {
       return sendJson(res, 200, {
         service: 'workbuddy-proxy',
         endpoints: ['/v1/models', '/v1/chat/completions', '/v1/messages', '/v1/messages/count_tokens', '/status', '/health'],
+        sites: siteKeys(cfg),
+        default_site: cfg.defaultSite,
         config: paths.config,
       });
     }
 
+    // 各站点登录态 + 剩余积分（国际版计费口径不同，查询失败只返回错误信息）
     if (pathname === '/status') {
-      const a = getAuth();
-      let credit = null;
-      try {
-        credit = await queryCredit(cfg);
-      } catch (e) {
-        credit = { error: e.message };
+      const only = url.searchParams.get('site');
+      const keys = siteKeys(cfg).filter((s) => !only || s === only);
+      const out = [];
+      for (const site of keys) {
+        const a = getAuth(site);
+        let credit = null;
+        if (isLoggedIn(site)) {
+          try {
+            credit = await queryCredit(cfg, site);
+          } catch (e) {
+            credit = { error: e.message };
+          }
+        }
+        out.push({
+          site,
+          label: cfg.sites[site].label,
+          apiBase: cfg.sites[site].apiBase,
+          logged_in: isLoggedIn(site),
+          uid: a.uid ? String(a.uid).slice(0, 8) + '…' : null,
+          nickname: a.nickname || null,
+          domain: a.domain || null,
+          token_expires_at: a.expiresAt ? new Date(a.expiresAt).toISOString() : null,
+          credit,
+        });
       }
-      return sendJson(res, 200, {
-        logged_in: isLoggedIn(),
-        uid: a.uid ? String(a.uid).slice(0, 8) + '…' : null,
-        nickname: a.nickname || null,
-        domain: a.domain || null,
-        token_expires_at: a.expiresAt ? new Date(a.expiresAt).toISOString() : null,
-        credit,
-      });
+      return sendJson(res, 200, { sites: out, default_site: cfg.defaultSite });
     }
 
     // 路径容错：不同客户端拼接方式不同（如 TraeWork 会拼成 /v1/messages/chat/completions），
@@ -141,12 +168,14 @@ server.keepAliveTimeout = 120000;
 server.requestTimeout = 0; // 流式长连接不设总时长上限
 
 server.listen(cfg.port, cfg.host, () => {
-  const a = getAuth();
-  log('WorkBuddy 反代已启动');
+  log('WorkBuddy 反代已启动（国内版 + 国际版多站点）');
   log(`  监听地址：http://${cfg.host}:${cfg.port}   （仅本机可达）`);
   log(`  API Key：${cfg.apiKey}`);
-  log(`  默认模型：${cfg.defaultModel}    配置文件：${paths.config}`);
-  log(`  登录状态：${isLoggedIn() ? `已登录 uid=${String(a.uid || '').slice(0, 8)}…` : '未登录 → 请运行 node login.mjs'}`);
+  log(`  默认站点/模型：${cfg.defaultSite} / ${cfg.defaultModel}    配置文件：${paths.config}`);
+  for (const s of siteState(cfg)) {
+    log(`  站点 ${s.site.padEnd(9)} ${s.logged_in ? `已登录 uid=${s.uid}` : '未登录'}   ${s.apiBase}`);
+  }
+  log('  未登录的站点可用：node login.mjs --site <站点名>');
   log(`  OpenAI 客户端：Base URL = http://${cfg.host}:${cfg.port}/v1`);
 });
 

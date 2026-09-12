@@ -1,16 +1,10 @@
 // OpenAI 兼容路由：/v1/models、/v1/chat/completions（流式 + 非流式，支持工具调用）
-import { openChat, aggregateFrames, classifyFrame, fetchModels, upstreamErrorMessage, newId } from './upstream.mjs';
+// 多站点：请求里的 model 可写裸 ID（自动选站点），也可写 `站点/模型` 显式指定。
+import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
+import { resolveTarget, mergedModels, parseMultiplier } from './router.mjs';
 import { startSSE, writeSSE, sendJson, sendError, estimateTokens } from './util.mjs';
 import { requestLog, warn } from './log.mjs';
-
-let modelCache = { at: 0, list: null };
-
-export function resolveModel(cfg, requested) {
-  const raw = (requested || '').trim();
-  if (!raw) return cfg.defaultModel;
-  return cfg.modelAliases?.[raw] || raw;
-}
 
 /** 帧白名单重建：剥掉上游噪声（空 content、空 tool_calls、未知字段），保证标准客户端可解析。 */
 export function normalizeChunk(obj, publicModel) {
@@ -31,34 +25,33 @@ export function normalizeChunk(obj, publicModel) {
       if (typeof d.reasoning_content === 'string' && d.reasoning_content) delta.reasoning_content = d.reasoning_content;
       if (typeof d.refusal === 'string' && d.refusal) delta.refusal = d.refusal;
       if (Array.isArray(d.tool_calls) && d.tool_calls.length) delta.tool_calls = d.tool_calls;
-      const nc = { index: c.index ?? 0, delta, finish_reason: c.finish_reason || null };
-      return nc;
+      return { index: c.index ?? 0, delta, finish_reason: c.finish_reason || null };
     });
   }
-  if (obj.usage !== undefined) out.usage = obj.usage;
-  else out.usage = null;
+  out.usage = obj.usage !== undefined ? obj.usage : null;
   return out;
 }
 
-/** 发起上游请求，遇 401 自动强刷 token 重试一次。 */
-async function openWithRetry(cfg, body, signal) {
-  let up = await openChat(cfg, body, { signal });
+/** 发起上游请求，遇 401 自动强刷该站点 token 重试一次。 */
+async function openWithRetry(cfg, site, body, signal) {
+  let up = await openChat(cfg, site, body, { signal });
   if (!up.ok && up.status === 401) {
-    warn('上游 401，强制刷新 token 后重试一次');
+    warn(`[${site}] 上游 401，强制刷新 token 后重试一次`);
     try {
-      await ensureToken(cfg, { force: true });
+      await ensureToken(cfg, site, { force: true });
     } catch (e) {
-      warn('刷新 token 失败：', e.message);
+      warn(`[${site}] 刷新 token 失败：`, e.message);
     }
-    up = await openChat(cfg, body, { signal });
+    up = await openChat(cfg, site, body, { signal });
   }
   return up;
 }
 
 export async function handleChatCompletions(ctx) {
   const { cfg, res, body, signal } = ctx;
-  const publicModel = (body.model || cfg.defaultModel).trim();
-  const model = resolveModel(cfg, body.model);
+  const target = await resolveTarget(cfg, body.model);
+  const { site, model } = target;
+  const publicModel = target.requested;
   const wantsStream = body.stream === true;
   const started = Date.now();
   let ttfb = null;
@@ -68,14 +61,14 @@ export async function handleChatCompletions(ctx) {
     upstreamBody.max_tokens = cfg.defaultMaxTokens;
   }
 
-  const up = await openWithRetry(cfg, upstreamBody, signal);
+  const up = await openWithRetry(cfg, site, upstreamBody, signal);
   if (!up.ok) {
-    requestLog({ model, mode: wantsStream ? 'stream' : 'json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });
-    return sendError(res, up.status, upstreamErrorMessage(up.status, up.text));
+    requestLog({ site, model, mode: wantsStream ? 'stream' : 'json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });
+    return sendError(res, up.status, upstreamErrorMessage(up.status, up.text, site));
   }
 
   if (wantsStream) {
-    startSSE(res, { 'X-Service': 'workbuddy-proxy' });
+    startSSE(res, { 'X-Service': 'workbuddy-proxy', 'X-Upstream-Site': site });
     let valid = 0;
     let finished = false;
     try {
@@ -99,6 +92,7 @@ export async function handleChatCompletions(ctx) {
       up.close();
       if (!res.writableEnded) res.end();
       requestLog({
+        site,
         model,
         mode: 'stream',
         status: finished ? 200 : 499,
@@ -115,7 +109,7 @@ export async function handleChatCompletions(ctx) {
   try {
     agg = await aggregateFrames(up.frames);
   } catch (e) {
-    requestLog({ model, mode: 'json', status: e.status || 502, ms: Date.now() - started, note: 'aggregate_failed' });
+    requestLog({ site, model, mode: 'json', status: e.status || 502, ms: Date.now() - started, note: 'aggregate_failed' });
     return sendError(res, e.status || 502, e.message);
   } finally {
     up.close();
@@ -127,8 +121,8 @@ export async function handleChatCompletions(ctx) {
   if (emptyAnswer && (agg.finishReason === 'length' || agg.frames > 0) && askedMax > 0 && askedMax < 1024) {
     const bumped = { ...upstreamBody, max_tokens: Math.max(1024, askedMax * 4) };
     delete bumped.max_completion_tokens;
-    warn(`空回答（finish=${agg.finishReason}，max_tokens=${askedMax}），放大到 ${bumped.max_tokens} 重试一次`);
-    const up2 = await openWithRetry(cfg, bumped, signal);
+    warn(`[${site}] 空回答（finish=${agg.finishReason}，max_tokens=${askedMax}），放大到 ${bumped.max_tokens} 重试一次`);
+    const up2 = await openWithRetry(cfg, site, bumped, signal);
     if (up2.ok) {
       try {
         agg = await aggregateFrames(up2.frames);
@@ -143,7 +137,7 @@ export async function handleChatCompletions(ctx) {
   }
 
   if (agg.frames === 0) {
-    requestLog({ model, mode: 'json', status: 502, ms: Date.now() - started, note: 'empty_stream' });
+    requestLog({ site, model, mode: 'json', status: 502, ms: Date.now() - started, note: 'empty_stream' });
     return sendError(res, 502, '上游返回空响应');
   }
 
@@ -164,11 +158,11 @@ export async function handleChatCompletions(ctx) {
     {
       prompt_tokens: estimateTokens(JSON.stringify(body.messages || [])),
       completion_tokens: estimateTokens(agg.content),
-      total_tokens:
-        estimateTokens(JSON.stringify(body.messages || [])) + estimateTokens(agg.content),
+      total_tokens: estimateTokens(JSON.stringify(body.messages || [])) + estimateTokens(agg.content),
     };
 
   requestLog({
+    site,
     model,
     mode: 'json',
     status: 200,
@@ -190,40 +184,49 @@ export async function handleChatCompletions(ctx) {
 
 export async function handleModels(ctx) {
   const { cfg, res } = ctx;
-  const now = Date.now();
-  let list = cfg.models || [];
-  let source = 'config';
-  const withCache = process.env.WB_FORCE_DYNAMIC_MODELS !== '1';
-  if (withCache && modelCache.list && now - modelCache.at < 5 * 60 * 1000) {
-    list = modelCache.list;
-    source = 'upstream(cache)';
-  } else {
-    try {
-      const dynamic = await fetchModels(cfg);
-      if (dynamic?.length) {
-        list = dynamic;
-        source = 'upstream';
-        modelCache = { at: now, list: dynamic };
-      }
-    } catch (e) {
-      warn('动态模型清单获取失败，使用配置兜底：', e.message);
+  const merged = await mergedModels(cfg);
+  const data = [];
+  const seen = new Set();
+
+  for (const [alias, targetModel] of Object.entries(cfg.modelAliases || {})) {
+    if (seen.has(alias)) continue;
+    seen.add(alias);
+    data.push({ id: alias, object: 'model', created: 1700000000, owned_by: 'workbuddy', name: `${alias} → ${targetModel}` });
+  }
+
+  for (const m of merged) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    const info = m.info || {};
+    const item = {
+      id: m.id,
+      object: 'model',
+      created: 1700000000,
+      owned_by: m.site,
+      name: info.name || m.id,
+      site: m.site,
+    };
+    if (info.credits) {
+      item.credits = info.credits; // 上游原始串，如 "x0.79 credits"
+      const mult = parseMultiplier(info.credits);
+      if (Number.isFinite(mult)) item.credits_multiplier = mult;
+    }
+    if (info.contextWindow) item.context_window = info.contextWindow;
+    if (info.maxTokens) item.max_output_tokens = info.maxTokens;
+    if (info.supportsImages) item.supports_images = true;
+    if (info.supportsToolCall) item.supports_tools = true;
+    if (m.aliasOf) item.alias_of = m.aliasOf;
+    data.push(item);
+  }
+
+  // 目录拉取失败（未登录/接口不可用）时用配置兜底，保证客户端至少能看到可用 ID
+  if (!merged.length) {
+    for (const m of cfg.models || []) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      data.push({ id: m.id, object: 'model', created: 1700000000, owned_by: 'workbuddy', name: m.name || m.id, site: cfg.defaultSite });
     }
   }
 
-  const data = [];
-  const seen = new Set();
-  for (const [alias, target] of Object.entries(cfg.modelAliases || {})) {
-    if (seen.has(alias)) continue;
-    seen.add(alias);
-    data.push({ id: alias, object: 'model', created: 1700000000, owned_by: 'workbuddy', name: `${alias} → ${target}` });
-  }
-  for (const m of list) {
-    if (seen.has(m.id)) continue;
-    seen.add(m.id);
-    const item = { id: m.id, object: 'model', created: 1700000000, owned_by: 'workbuddy', name: m.name || m.id };
-    if (m.contextWindow) item.context_window = m.contextWindow;
-    if (m.maxTokens) item.max_output_tokens = m.maxTokens;
-    data.push(item);
-  }
-  sendJson(res, 200, { object: 'list', data, source });
+  sendJson(res, 200, { object: 'list', data, source: merged.length ? 'upstream' : 'config' });
 }

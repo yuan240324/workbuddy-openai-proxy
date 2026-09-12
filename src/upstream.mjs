@@ -1,13 +1,13 @@
-// 上游（CodeBuddy / copilot.tencent.com）客户端：
+// 上游（CodeBuddy / WorkBuddy，国内版与国际版同构）客户端：
 //   - 请求体改写（上游只接受流式；tool_choice 只接受字符串）
 //   - SSE 读取（带首字节/空闲超时，客户端断开即中止）
-//   - 模型清单、额度查询
+//   - 模型清单（含积分倍率）、额度查询
 import crypto from 'node:crypto';
 import { getAuth, ensureToken } from './auth.mjs';
 import { chatHeaders, billingHeaders } from './headers.mjs';
 import { warn } from './log.mjs';
 
-/** 上游请求体改写：强制流式 + 角色/工具选择归一 + 剔除配置中要求剔除的字段。 */
+/** 上游请求体改写：强制流式 + 首条必须为 system + 角色/工具选择归一 + 剔除配置中要求剔除的字段。 */
 export function prepareBody(cfg, src) {
   const body = { ...src };
   body.stream = true;
@@ -18,6 +18,16 @@ export function prepareBody(cfg, src) {
       if (m && typeof m === 'object' && typeof m.role === 'string' && m.role.toLowerCase() === 'developer') {
         m.role = 'system';
       }
+    }
+
+    // 国际版硬性要求：第一条消息必须是 system，否则 400 "first message is not system prompt"
+    const first = body.messages[0];
+    const firstRole = first && typeof first === 'object' ? String(first.role || '').toLowerCase() : '';
+    if (firstRole !== 'system') {
+      body.messages = [
+        { role: 'system', content: cfg.defaultSystemPrompt || 'You are a helpful AI assistant.' },
+        ...body.messages,
+      ];
     }
   }
 
@@ -57,22 +67,24 @@ function normalizeToolChoice(body) {
 }
 
 export class UpstreamError extends Error {
-  constructor(message, { status = 502, code = null, transport = false } = {}) {
+  constructor(message, { status = 502, code = null, transport = false, site = null } = {}) {
     super(message);
     this.status = status;
     this.code = code;
     this.transport = transport;
+    this.site = site;
   }
 }
 
 /**
- * 发起一次上游聊天请求。
+ * 发起一次站点聊天请求。
  * 返回：{ ok:true, status, frames:AsyncGenerator<string>, close(), payload } 或
  *      { ok:false, status, text }
  */
-export async function openChat(cfg, body, { signal } = {}) {
-  const auth = getAuth();
-  await ensureToken(cfg);
+export async function openChat(cfg, site, body, { signal } = {}) {
+  const siteCfg = cfg.sites[site];
+  const auth = getAuth(site);
+  await ensureToken(cfg, site);
   const payload = prepareBody(cfg, body);
 
   const ac = new AbortController();
@@ -100,29 +112,30 @@ export async function openChat(cfg, body, { signal } = {}) {
 
   let res;
   try {
-    res = await fetch(cfg.upstream.apiBase + '/v2/chat/completions', {
+    res = await fetch(siteCfg.apiBase + '/v2/chat/completions', {
       method: 'POST',
-      headers: chatHeaders(cfg, auth),
+      headers: chatHeaders(siteCfg, auth),
       body: JSON.stringify(payload),
       signal: ac.signal,
     });
   } catch (e) {
     clearTimeout(headerTimer);
     cleanup();
-    throw new UpstreamError(`上游连接失败：${e?.message || e}`, { status: 504, transport: true });
+    throw new UpstreamError(`[${site}] 上游连接失败：${e?.message || e}`, { status: 504, transport: true, site });
   }
   clearTimeout(headerTimer);
 
   if (res.status >= 400) {
     const text = await res.text().catch(() => '');
     cleanup();
-    return { ok: false, status: res.status, text, payload };
+    return { ok: false, status: res.status, text, payload, site };
   }
 
   bumpIdle();
   return {
     ok: true,
     status: res.status,
+    site,
     payload,
     frames: readSSE(res.body, { onActivity: bumpIdle, onEnd: cleanup }),
     close: () => {
@@ -154,7 +167,6 @@ async function* readSSE(stream, { onActivity, onEnd }) {
         if (payload) yield payload;
       }
     }
-    // 结尾可能残留最后一行（无换行）
     const tail = (buf + decoder.decode()).trim();
     if (tail.startsWith('data:')) {
       const payload = tail.slice(5).trimStart();
@@ -234,17 +246,23 @@ export async function aggregateFrames(frames) {
   return out;
 }
 
-/** 拉取账号可用模型清单（动态接口，失败返回 null 由调用方兜底）。 */
-export async function fetchModels(cfg) {
-  const auth = getAuth();
-  await ensureToken(cfg);
-  const res = await fetch(cfg.upstream.apiBase + '/console/enterprises/personal/models', {
-    headers: { ...chatHeaders(cfg, auth), Accept: 'application/json' },
+/** 拉取站点可用模型清单（含积分倍率）。 */
+export async function fetchModels(cfg, site) {
+  const siteCfg = cfg.sites[site];
+  const auth = getAuth(site);
+  await ensureToken(cfg, site);
+  const res = await fetch(siteCfg.apiBase + '/console/enterprises/personal/models', {
+    headers: { ...chatHeaders(siteCfg, auth), Accept: 'application/json' },
   });
   const text = await res.text();
-  if (res.status !== 200) throw new UpstreamError(`模型接口 HTTP ${res.status}：${text.slice(0, 200)}`, { status: res.status });
-  const json = JSON.parse(text);
-  if (json.code !== 0) throw new UpstreamError(`模型接口 code=${json.code}：${String(json.msg || '').slice(0, 200)}`, { status: 502 });
+  if (res.status !== 200) throw new UpstreamError(`[${site}] 模型接口 HTTP ${res.status}：${text.slice(0, 200)}`, { status: res.status, site });
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new UpstreamError(`[${site}] 模型接口返回无法解析（HTTP ${res.status}）`, { status: 502, site });
+  }
+  if (json.code !== 0) throw new UpstreamError(`[${site}] 模型接口 code=${json.code}：${String(json.msg || '').slice(0, 200)}`, { status: 502, site });
   const models = json.data?.models || [];
   const agents = json.data?.agents || [];
   const cli = agents.find((a) => a.name === 'cli');
@@ -254,15 +272,20 @@ export async function fetchModels(cfg) {
     .map((m) => ({
       id: m.id,
       name: m.name || m.id,
+      credits: m.credits || null, // 积分倍率，如 "x0.79 credits"；x0.00 表示不扣积分
       contextWindow: m.maxInputTokens || null,
       maxTokens: m.maxOutputTokens || null,
+      supportsImages: Boolean(m.supportsImages),
+      supportsToolCall: Boolean(m.supportsToolCall),
+      supportsReasoning: Boolean(m.supportsReasoning),
     }));
 }
 
-/** 查询剩余积分（免费额度）。 */
-export async function queryCredit(cfg) {
-  const auth = getAuth();
-  await ensureToken(cfg);
+/** 查询站点剩余积分（免费额度）。国际版计费口径不同，失败时静默返回错误信息。 */
+export async function queryCredit(cfg, site) {
+  const siteCfg = cfg.sites[site];
+  const auth = getAuth(site);
+  await ensureToken(cfg, site);
   const now = new Date();
   const end = new Date(now.getTime() + 365 * 101 * 24 * 3600 * 1000);
   const fmt = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
@@ -274,9 +297,9 @@ export async function queryCredit(cfg) {
     PackageEndTimeRangeBegin: fmt(now),
     PackageEndTimeRangeEnd: fmt(end),
   };
-  const res = await fetch(cfg.upstream.billingBase + '/v2/billing/meter/get-user-resource', {
+  const res = await fetch(siteCfg.billingBase + '/v2/billing/meter/get-user-resource', {
     method: 'POST',
-    headers: billingHeaders(cfg, auth),
+    headers: billingHeaders(siteCfg, auth),
     body: JSON.stringify(body),
   });
   const text = await res.text();
@@ -284,9 +307,9 @@ export async function queryCredit(cfg) {
   try {
     json = JSON.parse(text);
   } catch {
-    throw new UpstreamError(`额度接口返回无法解析（HTTP ${res.status}）`, { status: 502 });
+    throw new UpstreamError(`[${site}] 额度接口返回无法解析（HTTP ${res.status}）`, { status: 502, site });
   }
-  if (json.code !== 0) throw new UpstreamError(`额度接口 code=${json.code}：${String(json.msg || '').slice(0, 160)}`, { status: 502 });
+  if (json.code !== 0) throw new UpstreamError(`[${site}] 额度接口 code=${json.code}：${String(json.msg || '').slice(0, 160)}`, { status: 502, site });
   const accounts = json.data?.Response?.Data?.Accounts || [];
   let remain = 0;
   const detail = [];
@@ -299,23 +322,25 @@ export async function queryCredit(cfg) {
   return { remain, detail };
 }
 
-export function upstreamErrorMessage(status, text) {
+export function upstreamErrorMessage(status, text, site = '') {
   let msg = text || '';
   try {
     const j = JSON.parse(text);
     msg = j.msg || j.error?.message || j.message || text;
   } catch {
-    /* 原始文本即可 */
+    if (status === 500 && /<html/i.test(msg)) msg = '上游网关 500（该接口在该站点不可用或临时故障）';
+    else if (/<html/i.test(msg)) msg = msg.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
+  const prefix = site ? `[${site}] ` : '';
   const map = {
-    401: '上游 401：登录态失效，请重新运行 node login.mjs 登录',
+    401: '上游 401：登录态失效，请重新登录',
     402: '上游 402：额度/积分不足',
     404: '上游 404：接口偶发不可用，稍后重试',
     429: '上游 429：触发限流，稍后重试',
   };
-  const prefix = map[status] || `上游 HTTP ${status}`;
-  warn(`上游返回 ${status}：${String(msg).slice(0, 200)}`);
-  return `${prefix}：${String(msg).slice(0, 500)}`;
+  const head = map[status] || `上游 HTTP ${status}`;
+  warn(`${prefix}上游返回 ${status}：${String(msg).slice(0, 200)}`);
+  return `${prefix}${head}：${String(msg).slice(0, 500)}`;
 }
 
 export function newId(prefix = 'chatcmpl') {

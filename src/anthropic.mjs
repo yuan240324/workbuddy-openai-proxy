@@ -2,6 +2,7 @@
 // Trae 的「Claude 型自定义模型」走 Anthropic Messages 协议，这里做双向转换。
 import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
+import { resolveTarget } from './router.mjs';
 import { startSSE, writeSSEEvent, sendJson, sendError, writeAsync, estimateTokens } from './util.mjs';
 import { requestLog, warn } from './log.mjs';
 
@@ -122,24 +123,24 @@ export async function handleMessages(ctx) {
   const publicModel = body.model || cfg.defaultModel;
   const wantsStream = body.stream === true; // 与 Anthropic 规范一致：缺省为非流式
   const started = Date.now();
-  const openaiBody = toOpenAIBody({ ...body, model: publicModel });
-  const alias = cfg.modelAliases?.[publicModel];
-  openaiBody.model = alias || publicModel;
+  const target = await resolveTarget(cfg, publicModel);
+  const { site, model } = target;
+  const openaiBody = toOpenAIBody({ ...body, model });
   if (openaiBody.max_tokens === undefined) openaiBody.max_tokens = cfg.defaultMaxTokens;
 
-  let up = await openChat(cfg, openaiBody, { signal });
+  let up = await openChat(cfg, site, openaiBody, { signal });
   if (!up.ok && up.status === 401) {
-    warn('上游 401，强制刷新 token 后重试一次');
+    warn(`[${site}] 上游 401，强制刷新 token 后重试一次`);
     try {
-      await ensureToken(cfg, { force: true });
+      await ensureToken(cfg, site, { force: true });
     } catch (e) {
-      warn('刷新 token 失败：', e.message);
+      warn(`[${site}] 刷新 token 失败：`, e.message);
     }
-    up = await openChat(cfg, openaiBody, { signal });
+    up = await openChat(cfg, site, openaiBody, { signal });
   }
   if (!up.ok) {
-    requestLog({ model: publicModel, mode: wantsStream ? 'anthropic-stream' : 'anthropic-json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });
-    return sendError(res, up.status, upstreamErrorMessage(up.status, up.text), 'api_error');
+    requestLog({ site, model, mode: wantsStream ? 'anthropic-stream' : 'anthropic-json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });
+    return sendError(res, up.status, upstreamErrorMessage(up.status, up.text, site), 'api_error');
   }
 
   if (!wantsStream) {
@@ -154,8 +155,8 @@ export async function handleMessages(ctx) {
     // 兜底：max_tokens 过小导致空回答时放大预算重试一次
     const askedMax = Number(body.max_tokens ?? 0);
     if (!agg.content && agg.toolCallList.length === 0 && askedMax > 0 && askedMax < 1024) {
-      warn(`空回答（finish=${agg.finishReason}，max_tokens=${askedMax}），放大到 1024 重试一次`);
-      const up2 = await openChat(cfg, { ...openaiBody, max_tokens: Math.max(1024, askedMax * 4) }, { signal });
+      warn(`[${site}] 空回答（finish=${agg.finishReason}，max_tokens=${askedMax}），放大到 1024 重试一次`);
+      const up2 = await openChat(cfg, site, { ...openaiBody, max_tokens: Math.max(1024, askedMax * 4) }, { signal });
       if (up2.ok) {
         try {
           agg = await aggregateFrames(up2.frames);
@@ -173,7 +174,7 @@ export async function handleMessages(ctx) {
     for (const tc of agg.toolCallList) {
       content.push({ type: 'tool_use', id: tc.id || newId('toolu'), name: tc.function.name, input: parseArgs(tc.function.arguments) });
     }
-    requestLog({ model: publicModel, mode: 'anthropic-json', status: 200, ms: Date.now() - started });
+    requestLog({ site, model, mode: 'anthropic-json', status: 200, ms: Date.now() - started });
     return sendJson(res, 200, {
       id: newId('msg'),
       type: 'message',
@@ -187,7 +188,7 @@ export async function handleMessages(ctx) {
   }
 
   // 流式：把 OpenAI 增量翻译成 Anthropic SSE 事件序列
-  startSSE(res, { 'X-Service': 'workbuddy-proxy' });
+  startSSE(res, { 'X-Service': 'workbuddy-proxy', 'X-Upstream-Site': site });
   const msgId = newId('msg');
   let blockIndex = -1; // 当前打开的内容块
   let textBlockOpened = false;
@@ -292,7 +293,7 @@ export async function handleMessages(ctx) {
   } finally {
     up.close();
     if (!res.writableEnded) res.end();
-    requestLog({ model: publicModel, mode: 'anthropic-stream', status: closed ? 502 : 200, ms: Date.now() - started, blocks: nextBlock });
+    requestLog({ site, model, mode: 'anthropic-stream', status: closed ? 502 : 200, ms: Date.now() - started, blocks: nextBlock });
   }
 }
 

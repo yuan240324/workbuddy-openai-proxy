@@ -1,8 +1,12 @@
 # 本地凭证与个人配置（切勿提交）
 auth.json
+auth.*.json
 config.json
 .login-state.json
 .gh-token
 node_modules/
 *.log
 _ref/
+
+# 与本项目无关的其他目录（各自独立，不与本仓库混合提交）
+zcode-proxy/
