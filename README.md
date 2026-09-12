@@ -197,13 +197,34 @@ node login.mjs --site intl-work     # 国际版 WorkBuddy（workbuddy.ai）
 
 | 模型 ID | 说明 |
 |---|---|
+| `gpt-6-astra` | GPT-6 Astra（上新中，上游 provider 偶发不可用） |
+| `gpt-5.6-luna` · `gpt-5.6-terra` · `gpt-5.6-sol` | GPT-5.6 三个代号版本（`sol` 偶发不可用） |
+| `gpt-5.5` · `gpt-5.4` · `gpt-5.3-codex` | 上一代 GPT 与 Codex 变体 |
 | `claude-sonnet-4.6` · `claude-opus-4.6` | **Claude 系（国内版没有）**，实测为真 Claude |
-| `gpt-5.4` | **GPT-5.4（国内版没有）** |
-| `gemini-3.1-pro` | **Gemini 3.1 Pro（国内版没有）** |
-| `deepseek-v4.1-flash` · `minimax-m3` · `kimi-k2.7` · `glm-5.3` · `glm-5.2` | 与国际版目录一致 |
+| `gemini-3.1-pro` · `gemini-3.5-flash` · `gemini-3.1-flash-image` | **Gemini 系（国内版没有）** |
+| `deepseek-v4.1-flash` | 实测 **0 扣费**（国内版同名模型按 x0.03 收费） |
+| `glm-5.3` · `glm-5.2` · `kimi-k3` · `kimi-k2.7` · `kimi-k2.6` · `kimi-k2.5` · `minimax-m3` · `hy3` | 与国内版有交集的模型 |
 | `auto` | 上游自动路由 |
 
-判断某个 ID 是否可用：直接发一次请求，不存在时上游返回 `400 model [X] service info not found`（不消耗额度）。
+**实测参考单价**（≈2.4k token 输入一次调用，来自响应里的 `usage.credit`）：
+
+| 模型 | 扣费 credit | 每 1k 输入 token |
+|---|---|---|
+| `gpt-5.6-luna` | 0.06 | 0.027 |
+| `gpt-5.3-codex` | 0.17 | 0.075 |
+| `deepseek-v4.1-flash` | 0 | 0 |
+| `gemini-3.5-flash` | 0.47 | 0.209 |
+| `gpt-5.6-terra` | 0.57 | 0.252 |
+| `claude-sonnet-4.6` | 2.51（同类输入） | 0.277 |
+| `gpt-5.5` | 1.19 | 0.526 |
+
+判断某个 ID 是否可用（不消耗额度）：
+
+- `400 model [X] service info not found` → 账号无此模型
+- `500 the model provider is temporarily unavailable` → 模型存在，上游临时不可用
+- `200` → 可用
+
+账号**无权限**的（实测）：`claude-sonnet-5`、`claude-opus-4.7/4.8`、`gpt-5.1-codex*`、`gemini-2.5-pro`、`gemini-3.1-flash-lite` 等。
 
 ### 4.1.2 国际版的两个坑（本项目已自动处理）
 
