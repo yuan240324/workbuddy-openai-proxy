@@ -1,15 +1,16 @@
 // 设备授权登录（OAuth device flow，多站点）：不读取 WorkBuddy 客户端任何本地文件，
 // 只把浏览器授权后拿到的 token 写入本项目的 auth.<site>.json。
 //
-//   node login.mjs                        登录默认站点（cn-cli）
-//   node login.mjs --site intl-cli        登录国际版 CLI（codebuddy.ai）
-//   node login.mjs --site intl-work       登录国际版 WorkBuddy（workbuddy.ai）
+//   node login.mjs                           登录默认站点（cn-cli）
+//   node login.mjs --site intl-cli           登录国际版 CLI（codebuddy.ai）
+//   node login.mjs --site intl-work          登录国际版 WorkBuddy（workbuddy.ai）
 //   node login.mjs --site cn-cli --no-open   只打印授权链接，不自动打开浏览器
+//   node login.mjs --site intl-cli 1800      自定义等待秒数（默认 600）
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { loadConfig, paths, authPathFor, siteKeys } from './src/config.mjs';
-import { saveAuth, jwtClaims, hydrateFromToken } from './src/auth.mjs';
-import { commonHeaders } from './src/headers.mjs';
+import { jwtClaims } from './src/auth.mjs';
+import { startLogin, pollLogin } from './src/device-login.mjs';
 import { log, warn } from './src/log.mjs';
 
 const cfg = loadConfig();
@@ -25,34 +26,6 @@ if (!cfg.sites?.[siteKey]) {
   process.exit(1);
 }
 const site = cfg.sites[siteKey];
-
-const jar = new Map();
-const cookieHeader = () => [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
-function storeCookies(res) {
-  const list = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
-  for (const c of list) {
-    const pair = c.split(';')[0];
-    const i = pair.indexOf('=');
-    if (i > 0) jar.set(pair.slice(0, i).trim(), pair.slice(i + 1).trim());
-  }
-}
-
-async function api(method, url, { body, token } = {}) {
-  const headers = commonHeaders(site);
-  if (body) headers['Content-Type'] = 'application/json';
-  if (jar.size) headers.Cookie = cookieHeader();
-  if (token) headers.Authorization = 'Bearer ' + token;
-  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
-  storeCookies(res);
-  const text = await res.text();
-  let json = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    /* 非 JSON 响应 */
-  }
-  return { status: res.status, json, text };
-}
 
 function openBrowser(url) {
   try {
@@ -74,11 +47,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
   log(`开始登录站点 [${siteKey}] ${site.label}`);
-  const stateRes = await api('POST', site.apiBase + '/v2/plugin/auth/state?platform=CLI', { body: {} });
-  if (stateRes.status >= 400 || stateRes.json?.code !== 0 || !stateRes.json?.data?.state || !stateRes.json?.data?.authUrl) {
-    throw new Error(`申请授权状态失败（HTTP ${stateRes.status}）：${stateRes.text.slice(0, 300)}`);
-  }
-  const { state, authUrl } = stateRes.json.data;
+  const { state, authUrl } = await startLogin(cfg, siteKey);
   fs.writeFileSync(paths.loginState, JSON.stringify({ site: siteKey, state, authUrl, at: Date.now() }, null, 2), 'utf8');
 
   console.log('');
@@ -102,37 +71,14 @@ async function main() {
   let lastMsg = '';
   while (Date.now() < deadline) {
     await sleep(POLL_MS);
-    const res = await api('GET', site.apiBase + '/v2/plugin/auth/token?state=' + encodeURIComponent(state));
-    const data = res.json?.data;
-    if (res.status < 400 && res.json?.code === 0 && data?.accessToken) {
-      const auth = {
-        site: siteKey,
-        accessToken: data.accessToken,
-        refreshToken: data.refreshToken || '',
-        expiresAt: data.expiresIn ? Date.now() + data.expiresIn * 1000 : undefined,
-        domain: data.domain || undefined,
-        savedAt: new Date().toISOString(),
-      };
-      try {
-        const acct = await api('GET', site.apiBase + '/v2/plugin/login/account?state=' + encodeURIComponent(state), {
-          token: data.accessToken,
-        });
-        const a = acct.json?.data;
-        if (a) {
-          auth.uid = a.uid;
-          auth.enterpriseId = a.enterpriseId;
-          auth.nickname = a.nickname;
-        }
-      } catch (e) {
-        warn('获取账号信息失败（不影响使用）：', e.message);
-      }
-      hydrateFromToken(siteKey, auth);
-      const saved = saveAuth(siteKey, auth);
+    const r = await pollLogin(cfg, siteKey, state);
+    if (r.done) {
       try {
         fs.unlinkSync(paths.loginState);
       } catch {
         /* 忽略 */
       }
+      const saved = r.auth;
       const claims = jwtClaims(saved.accessToken) || {};
       console.log('');
       log(`登录成功 ✅  （站点 ${siteKey}）`);
@@ -143,7 +89,7 @@ async function main() {
       log(`  凭证已写入：${authPathFor(siteKey)}`);
       return;
     }
-    const msg = res.json?.msg || res.text || `HTTP ${res.status}`;
+    const msg = r.msg || '';
     if (msg !== lastMsg) {
       lastMsg = msg;
       process.stdout.write(`\n等待授权…（上游：${String(msg).slice(0, 80)}）\n`);
