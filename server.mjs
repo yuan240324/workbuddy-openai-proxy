@@ -115,6 +115,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { sites: out, default_site: cfg.defaultSite });
     }
 
+    // 优雅停止（供 stop.cmd / stop.mjs 调用；需要本地 API Key，避免被误触）
+    if (pathname === '/admin/shutdown' && req.method === 'POST') {
+      log('收到停止指令，服务即将退出');
+      sendJson(res, 200, { ok: true, message: 'shutting down' });
+      setTimeout(() => process.exit(0), 150);
+      return;
+    }
+
     // 路径容错：不同客户端拼接方式不同（如 TraeWork 会拼成 /v1/messages/chat/completions），
     // 这里按“路径里是否包含某段”来判断，只要语义明确就命中对应处理器。
     const seg = (s) => pathname.includes(s);

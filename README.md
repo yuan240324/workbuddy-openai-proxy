@@ -58,26 +58,46 @@ workbuddy-openai-proxy/
 
 ---
 
-## 2. 启动服务
+## 2. 启动 / 停止服务
 
 ```powershell
-node server.mjs          # 或双击 start.cmd（前台）
-                         # 或双击 start-hidden.cmd（后台最小化）
+node server.mjs          # 前台运行（日志直接打在终端，Ctrl+C 停止）
 ```
+
+双击脚本更省事：
+
+| 脚本 | 作用 |
+|---|---|
+| `start.cmd` | 前台启动（带日志，关窗口即停） |
+| `start-hidden.cmd` | 后台最小化启动 |
+| `start-hidden.vbs` | 完全隐藏启动，日志写入 `server.log`（桌面快捷方式用的就是它） |
+| `stop.cmd` | 停止服务（调 `/admin/shutdown`，不依赖 WMI/进程枚举） |
+| `status.cmd` | 查看各站点登录态 + 剩余积分 |
+| `ask.cmd` / `ask.mjs` | 命令行提问，用来验证代理是否正常 |
+| `login.cmd` / `login-intl.cmd` | 登录国内版 / 选择国际版站点 |
+
+**桌面快捷方式**：指向 `wscript.exe "…\start-hidden.vbs"`，双击即静默启动服务（不会弹黑窗）。
 
 启动后终端会打印：
 
 ```
 监听地址：http://127.0.0.1:8788   （仅本机可达）
 API Key：<你的本地 API Key>（首次启动自动生成）
-默认模型：deepseek-v4-pro
+默认站点/模型：cn-cli / deepseek-v4-pro
+站点 cn-cli    已登录 uid=xxxxxxxx…   https://copilot.tencent.com
+站点 intl-cli  已登录 uid=xxxxxxxx…   https://www.codebuddy.ai
+站点 intl-work 未登录                 https://www.workbuddy.ai
 ```
 
-自检 / 查额度：
+> **Key 与 URL 只需填一次**：它们保存在 `config.json` 里，重启服务/重启电脑都不变；
+> 只有删掉 `config.json`（会重新随机生成 Key）或改 `port`（URL 会变）才需要重新填。
+
+自检：
 
 ```powershell
-node -e "fetch('http://127.0.0.1:8788/health').then(r=>r.text()).then(console.log)"
-status.cmd              # 登录态 + 剩余积分（等价于访问 /status）
+status.cmd                              # 各站点登录态 + 剩余积分
+node ask.mjs --list                     # 列出全部模型（含站点与积分倍率）
+node ask.mjs claude-sonnet-4.6 "你好"    # 直接提问，会显示是哪个站点接的
 ```
 
 ---
