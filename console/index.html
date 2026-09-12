@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WorkBuddy 反代控制台</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a22; --panel2:#1d2230; --line:#262c3a;
+    --fg:#e6e9ef; --dim:#8b93a7; --accent:#4c8dff; --ok:#2ecc71; --warn:#f5a524; --bad:#ff5c5c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:9}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.3px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px rgba(46,204,113,.7)}
+  .dot.off{background:var(--bad)}
+  .grow{flex:1}
+  .muted{color:var(--dim)}
+  nav{display:flex;gap:6px;padding:10px 18px 0;flex-wrap:wrap}
+  nav button{background:var(--panel2);border:1px solid var(--line);color:var(--fg);padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px}
+  nav button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  main{padding:16px 18px 40px;max-width:1180px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .card h3{margin:0 0 10px;font-size:14px;display:flex;align-items:center;gap:8px}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px}
+  .kv span:first-child{color:var(--dim)}
+  .code{font-family:ui-monospace,Consolas,monospace;background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12.5px;word-break:break-all}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--dim);font-weight:500;position:sticky;top:57px;background:var(--panel)}
+  tr:hover td{background:#1a1f2b}
+  .pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11.5px;border:1px solid var(--line);color:var(--dim)}
+  .pill.free{color:#0b0e13;background:var(--ok);border-color:var(--ok);font-weight:600}
+  .pill.paid{color:var(--warn);border-color:#5a4413}
+  .pill.ok{color:var(--ok);border-color:#1d4a2f}
+  .pill.bad{color:var(--bad);border-color:#4a1d1d}
+  button{font:inherit}
+  .btn{background:var(--panel2);border:1px solid var(--line);color:var(--fg);padding:6px 12px;border-radius:8px;cursor:pointer}
+  .btn:hover{border-color:#39415a}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.danger{border-color:#5a1f1f;color:#ffb4b4}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  input,select{background:#0b0e13;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 10px;font:inherit}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  #logs{background:#0b0e13;border:1px solid var(--line);border-radius:10px;padding:10px;height:440px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12.3px;white-space:pre-wrap}
+  .lv-warn{color:var(--warn)} .lv-error{color:var(--bad)} .lv-req{color:#9fd0ff} .lv-info{color:var(--dim)}
+  .bars{display:flex;gap:6px;align-items:flex-end;height:110px;margin-top:8px}
+  .bar{flex:1;background:linear-gradient(180deg,var(--accent),#2b4b8f);border-radius:5px 5px 0 0;min-height:3px;position:relative}
+  .bar b{position:absolute;top:-18px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--dim);font-weight:400}
+  .bar i{position:absolute;bottom:-20px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--dim);font-style:normal}
+  .hint{font-size:12.5px;color:var(--dim);margin:6px 0 0}
+  .hidden{display:none}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--dim);border-top-color:transparent;border-radius:50%;animation:s .8s linear infinite;vertical-align:-2px}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <span id="health" class="dot"></span>
+  <h1>WorkBuddy 反代控制台</h1>
+  <span class="muted" id="verline"></span>
+  <span class="grow"></span>
+  <span class="muted" id="defmodel"></span>
+  <button class="btn" onclick="location.reload()">刷新</button>
+</header>
+
+<nav>
+  <button data-tab="overview" class="active">状态总览</button>
+  <button data-tab="models">模型与切换</button>
+  <button data-tab="usage">用量统计</button>
+  <button data-tab="logs">实时日志</button>
+  <button data-tab="accounts">账号登录</button>
+  <button data-tab="service">服务</button>
+</nav>
+
+<main>
+  <!-- 总览 -->
+  <section id="tab-overview">
+    <div class="cards" id="siteCards"></div>
+    <div class="card" style="margin-top:12px">
+      <h3>接到 TraeWork / Trae（填一次即可）</h3>
+      <div class="kv"><span>API 格式</span><span>OpenAI Chat Completions 格式</span></div>
+      <div class="kv"><span>自定义请求地址</span><span></span></div>
+      <div class="code" id="fullUrl" style="margin:6px 0"></div>
+      <div class="kv"><span>API 密钥</span><span></span></div>
+      <div class="code" id="apiKey"></div>
+      <p class="hint">模型 ID 填 <b>default</b> 就能用当前默认模型；以后换模型在本控制台点一下即可，<b>不用再改 TraeWork</b>。<br>想固定用某个模型，也可直接填该模型 ID（如 <code>gpt-5.6-luna</code>、<code>claude-sonnet-4.6</code>）。</p>
+    </div>
+  </section>
+
+  <!-- 模型 -->
+  <section id="tab-models" class="hidden">
+    <div class="card">
+      <div class="row">
+        <b>当前默认模型：</b><span id="curDefault" class="pill ok"></span>
+        <span class="grow"></span>
+        <input id="modelFilter" placeholder="搜索模型 ID / 名称" style="width:220px" oninput="renderModels()" />
+        <button class="btn" onclick="setDefault('default')">恢复为 default</button>
+        <button class="btn" id="probeBtn" onclick="probeVisible()">探测可见模型</button>
+      </div>
+      <p class="hint">点表格里的「设为默认」即可切换。带 <span class="pill free">免费</span> 的是实测 0 扣费模型。<br>
+      注意：目录来自各站点实时接口，国际版控制台接口不稳定时会用内置清单兜底，因此个别模型可能标了「未探测」。</p>
+      <div style="overflow:auto;max-height:60vh"><table id="modelTable"><thead><tr>
+        <th>模型 ID</th><th>站点</th><th>倍率</th><th>上下文</th><th>名称</th><th>探测</th><th></th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- 用量 -->
+  <section id="tab-usage" class="hidden">
+    <div class="cards" id="usageCards"></div>
+    <div class="card" style="margin-top:12px">
+      <h3>最近 7 天调用</h3>
+      <div class="bars" id="usageBars"></div>
+      <div style="height:24px"></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <h3>按模型排行</h3>
+      <div style="overflow:auto"><table id="usageTable"><thead><tr>
+        <th>模型</th><th>站点</th><th>调用</th><th>失败</th><th>入 token</th><th>出 token</th><th>消耗 credit</th>
+      </tr></thead><tbody></tbody></table></div>
+      <div class="row" style="margin-top:10px"><button class="btn danger" onclick="resetUsage()">清空统计</button></div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" class="hidden">
+    <div class="card">
+      <div class="row"><b>实时日志</b>
+        <span class="muted">（内存缓冲最近 500 条，自动刷新）</span>
+        <span class="grow"></span>
+        <label class="muted"><input type="checkbox" id="autoScroll" checked /> 自动滚动</label>
+        <button class="btn" onclick="document.getElementById('logs').textContent=''">清屏</button>
+      </div>
+      <div id="logs"></div>
+    </div>
+  </section>
+
+  <!-- 账号 -->
+  <section id="tab-accounts" class="hidden">
+    <div class="cards" id="accountCards"></div>
+    <div class="card hidden" id="loginBox" style="margin-top:12px">
+      <h3>完成授权</h3>
+      <p class="hint">在浏览器打开下面的链接登录（国际版可在页面直接注册），然后点「我已完成授权」。</p>
+      <div class="code" id="loginUrl"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" onclick="openLoginUrl()">打开授权链接</button>
+        <button class="btn" onclick="copyText(document.getElementById('loginUrl').textContent)">复制链接</button>
+        <button class="btn" onclick="pollLogin()">我已完成授权</button>
+        <span id="loginMsg" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 服务 -->
+  <section id="tab-service" class="hidden">
+    <div class="card">
+      <h3>服务信息</h3>
+      <div class="kv"><span>版本 / Node</span><span id="svcVer"></span></div>
+      <div class="kv"><span>运行时长</span><span id="svcUp"></span></div>
+      <div class="kv"><span>监听</span><span id="svcHost"></span></div>
+      <div class="kv"><span>默认站点</span><span id="svcSite"></span></div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn danger" onclick="stopService()">停止服务</button>
+        <span class="muted">停止后需用桌面快捷方式或 start.cmd 重新启动</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const TOKEN = window.__WB_TOKEN__ || '';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+async function api(path, opts = {}) {
+  const res = await fetch('/console/api' + path, {
+    ...opts,
+    headers: { 'X-Console-Token': TOKEN, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  if (!res.ok) throw new Error(json.error || ('HTTP ' + res.status));
+  return json;
+}
+
+let STATE = null, MODELS = null, ALIASES = {}, loginSite = null;
+
+// ---------- tabs ----------
+document.querySelectorAll('nav button').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('active', x === b));
+    ['overview', 'models', 'usage', 'logs', 'accounts', 'service'].forEach((t) => {
+      $('tab-' + t).classList.toggle('hidden', t !== b.dataset.tab);
+    });
+    if (b.dataset.tab === 'usage') loadUsage();
+    if (b.dataset.tab === 'models') renderModels();
+    if (b.dataset.tab === 'accounts') renderAccounts();
+  };
+});
+
+// ---------- 状态总览 ----------
+function fmtUptime(ms) {
+  const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  return d ? `${d}天${h % 24}小时` : h ? `${h}小时${m % 60}分` : m ? `${m}分${s % 60}秒` : `${s}秒`;
+}
+
+async function loadState() {
+  STATE = await api('/state');
+  $('health').className = 'dot ' + (STATE.sites.some((s) => s.logged_in) ? 'on' : 'off');
+  $('verline').textContent = `v${STATE.version} · Node ${STATE.node}`;
+  $('defmodel').textContent = `默认模型：${STATE.default_model}`;
+  $('fullUrl').textContent = STATE.full_url;
+  $('apiKey').textContent = '（见 config.json 的 apiKey，点击此处显示）';
+  $('apiKey').onclick = () => { $('apiKey').textContent = STATE.api_key_masked + '（完整值在 config.json）'; };
+  $('svcVer').textContent = `v${STATE.version} / ${STATE.node}`;
+  $('svcUp').textContent = fmtUptime(STATE.uptime_ms);
+  $('svcHost').textContent = STATE.base_url;
+  $('svcSite').textContent = STATE.default_site;
+
+  $('siteCards').innerHTML = STATE.sites.map((s) => `
+    <div class="card">
+      <h3><span class="dot ${s.logged_in ? 'on' : 'off'}"></span>${esc(s.label)}
+        ${s.enabled ? '' : '<span class="pill">已禁用</span>'}</h3>
+      <div class="kv"><span>站点键</span><span>${esc(s.site)}</span></div>
+      <div class="kv"><span>上游</span><span>${esc(s.apiBase)}</span></div>
+      <div class="kv"><span>登录</span><span>${s.logged_in ? '已登录 ' + esc(s.uid || '') : '未登录'}</span></div>
+      ${s.nickname ? `<div class="kv"><span>昵称</span><span>${esc(s.nickname)}</span></div>` : ''}
+      <div class="kv"><span>剩余额度</span><span>${s.credit !== undefined ? '<b>' + s.credit + '</b> credits' : (s.credit_error ? '<span class="pill bad">查询失败</span>' : '—')}</span></div>
+      <div class="kv"><span>可用模型</span><span>${s.model_count} 个${s.catalog_source === 'seed' ? '（内置清单）' : ''}</span></div>
+      <div class="kv"><span>token 到期</span><span>${s.token_expires_at ? new Date(s.token_expires_at).toLocaleString() : '—'}</span></div>
+    </div>`).join('');
+}
+
+// ---------- 模型 ----------
+async function loadModels() {
+  MODELS = await api('/models');
+  ALIASES = MODELS.aliases || {};
+  $('curDefault').textContent = MODELS.default_model;
+  $('defmodel').textContent = `默认模型：${MODELS.default_model}`;
+  renderModels();
+}
+
+function multText(m) {
+  if (m.free) return '<span class="pill free">免费 x0.00</span>';
+  if (m.credits) return `<span class="pill paid">${esc(m.credits)}</span>`;
+  if (m.multiplier !== null) return `<span class="pill paid">x${m.multiplier}</span>`;
+  return '<span class="pill">—</span>';
+}
+
+function renderModels() {
+  if (!MODELS) return;
+  const q = ($('modelFilter').value || '').toLowerCase();
+  const rows = MODELS.data.filter((m) => !q || (m.id + ' ' + (m.name || '')).toLowerCase().includes(q));
+  $('modelTable').querySelector('tbody').innerHTML = rows.map((m) => {
+    const isDef = m.id === MODELS.default_model;
+    return `<tr>
+      <td><code>${esc(m.id)}</code>${m.alias_of ? ` <span class="pill">→${esc(m.alias_of)}</span>` : ''}${m.pending_login ? ' <span class="pill">未登录</span>' : ''}</td>
+      <td>${esc(m.site)}</td>
+      <td>${multText(m)}</td>
+      <td>${m.context ? Math.round(m.context / 1000) + 'k' : '—'}</td>
+      <td class="muted">${esc(m.name || '')}</td>
+      <td class="probe-cell" data-id="${esc(m.id)}" data-site="${esc(m.site)}">—</td>
+      <td>${isDef ? '<span class="pill ok">当前默认</span>' : `<button class="btn" onclick="setDefault('${esc(m.id)}','${esc(m.site)}')">设为默认</button>`}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function setDefault(model, site) {
+  const r = await api('/default-model', { method: 'POST', body: { model, site } });
+  $('curDefault').textContent = r.default_model;
+  $('defmodel').textContent = `默认模型：${r.default_model}`;
+  await loadModels();
+}
+
+async function probeVisible() {
+  const q = ($('modelFilter').value || '').toLowerCase();
+  const rows = MODELS.data.filter((m) => !q || (m.id + ' ' + (m.name || '')).toLowerCase().includes(q)).slice(0, 40);
+  const targets = rows.map((m) => {
+    const [site, model] = m.id.includes('/') && !m.alias_of ? m.id.split('/') : [m.site, m.alias_of || m.id];
+    return { site, model };
+  });
+  $('probeBtn').disabled = true;
+  $('probeBtn').innerHTML = '<span class="spin"></span> 探测中…';
+  try {
+    const r = await api('/probe', { method: 'POST', body: { targets } });
+    for (const x of r.results) {
+      const cell = document.querySelector(`.probe-cell[data-id="${CSS.escape(x.model)}"][data-site="${CSS.escape(x.site)}"]`)
+        || document.querySelector(`.probe-cell[data-id="${CSS.escape(x.site + '/' + x.model)}"]`);
+      if (cell) cell.innerHTML = x.ok ? '<span class="pill ok">可用</span>' : `<span class="pill bad">${x.status || 'ERR'}</span>`;
+    }
+  } finally {
+    $('probeBtn').disabled = false;
+    $('probeBtn').textContent = '探测可见模型';
+  }
+}
+
+// ---------- 用量 ----------
+async function loadUsage() {
+  const u = await api('/usage');
+  const t = u.today;
+  $('usageCards').innerHTML = `
+    <div class="card"><h3>今日</h3>
+      <div class="kv"><span>调用次数</span><span><b>${t.calls}</b>（失败 ${t.errors}）</span></div>
+      <div class="kv"><span>输入 / 输出 token</span><span>${t.promptTokens} / ${t.completionTokens}</span></div>
+      <div class="kv"><span>消耗 credit</span><span>${(+t.credit).toFixed(3)}</span></div>
+    </div>
+    <div class="card"><h3>累计（自 ${u.since}）</h3>
+      <div class="kv"><span>调用次数</span><span><b>${u.totals.calls}</b>（失败 ${u.totals.errors}）</span></div>
+      <div class="kv"><span>输入 / 输出 token</span><span>${u.totals.promptTokens} / ${u.totals.completionTokens}</span></div>
+      <div class="kv"><span>消耗 credit</span><span>${(+u.totals.credit).toFixed(3)}</span></div>
+    </div>`;
+  const max = Math.max(1, ...u.recent.map((d) => d.calls));
+  $('usageBars').innerHTML = u.recent.map((d) => `
+    <div class="bar" style="height:${Math.max(3, (d.calls / max) * 100)}%" title="${d.date} 调用 ${d.calls} 次 / ${(+d.credit).toFixed(3)} credit">
+      <b>${d.calls}</b><i>${d.date.slice(5)}</i></div>`).join('');
+  $('usageTable').querySelector('tbody').innerHTML = u.byModel.slice(0, 40).map((m) => `
+    <tr><td><code>${esc(m.model)}</code></td><td>${esc(m.site)}</td><td>${m.calls}</td>
+      <td>${m.errors || ''}</td><td>${m.promptTokens}</td><td>${m.completionTokens}</td>
+      <td>${(+m.credit).toFixed(3)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">暂无数据</td></tr>';
+}
+
+async function resetUsage() {
+  if (!confirm('确定清空用量统计？')) return;
+  await api('/usage/reset', { method: 'POST' });
+  loadUsage();
+}
+
+// ---------- 日志 ----------
+let lastSeq = 0;
+async function pollLogs() {
+  try {
+    const r = await api('/logs?after=' + lastSeq);
+    lastSeq = r.lastSeq;
+    if (r.list.length) {
+      const box = $('logs');
+      box.insertAdjacentHTML('beforeend', r.list.map((l) =>
+        `<div class="lv-${esc(l.level)}">${esc(l.time)} [${esc(l.level.toUpperCase())}] ${esc(l.text)}</div>`).join(''));
+      if ($('autoScroll').checked) box.scrollTop = box.scrollHeight;
+    }
+  } catch { /* 忽略 */ }
+}
+
+// ---------- 账号 ----------
+function renderAccounts() {
+  if (!STATE) return;
+  $('accountCards').innerHTML = STATE.sites.map((s) => `
+    <div class="card">
+      <h3><span class="dot ${s.logged_in ? 'on' : 'off'}"></span>${esc(s.label)}</h3>
+      <div class="kv"><span>站点键</span><span>${esc(s.site)}</span></div>
+      <div class="kv"><span>状态</span><span>${s.logged_in ? '已登录 ' + esc(s.uid || '') : '未登录'}</span></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" onclick="startLogin('${esc(s.site)}')">${s.logged_in ? '重新登录' : '开始登录'}</button>
+        ${s.logged_in ? `<button class="btn danger" onclick="logout('${esc(s.site)}')">退出登录</button>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+async function startLogin(site) {
+  loginSite = site;
+  const r = await api('/login/start', { method: 'POST', body: { site } });
+  $('loginBox').classList.remove('hidden');
+  $('loginUrl').textContent = r.authUrl;
+  $('loginMsg').textContent = '等待授权…';
+  openLoginUrl();
+  pollLogin();
+}
+
+function openLoginUrl() { window.open($('loginUrl').textContent, '_blank'); }
+
+async function pollLogin() {
+  if (!loginSite) return;
+  try {
+    const r = await api('/login/poll?site=' + encodeURIComponent(loginSite));
+    if (r.done) {
+      $('loginMsg').innerHTML = `<span class="pill ok">登录成功</span> ${esc(r.uid || '')} ${esc(r.nickname || '')}`;
+      await loadState();
+      renderAccounts();
+      return;
+    }
+    $('loginMsg').textContent = '等待授权…（' + String(r.msg || '').slice(0, 60) + '）';
+  } catch (e) {
+    $('loginMsg').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+    return;
+  }
+  setTimeout(pollLogin, 3000);
+}
+
+async function logout(site) {
+  if (!confirm(`确定退出 ${site} 的登录？（只删除本项目内的凭证文件）`)) return;
+  await api('/login/logout', { method: 'POST', body: { site } });
+  await loadState();
+  renderAccounts();
+}
+
+// ---------- 服务 ----------
+async function stopService() {
+  if (!confirm('确定停止反代服务？TraeWork 会立刻连不上。')) return;
+  try { await api('/service/stop', { method: 'POST' }); } catch { /* 连接会被切断 */ }
+  document.body.innerHTML = '<div style="padding:40px;font:16px/1.8 sans-serif;color:#e6e9ef;background:#0f1115;height:100vh">' +
+    '<h2>服务已停止</h2><p>双击桌面快捷方式「启动 WorkBuddy 反代」或运行 start.cmd 可重新启动。</p></div>';
+}
+
+function copyText(t) { navigator.clipboard?.writeText(t); }
+
+// ---------- 启动 ----------
+(async () => {
+  await loadState();
+  await loadModels();
+  renderAccounts();
+  pollLogs();
+  setInterval(pollLogs, 2000);
+  setInterval(loadState, 20000);
+})();
+</script>
+</body>
+</html>
