@@ -1,21 +1,25 @@
 # workbuddy-openai-proxy
 
-把 **WorkBuddy / CodeBuddy 账号额度（国内版 + 国际版）** 包装成本机上的
-**OpenAI 兼容 + Anthropic 兼容** 接口，供 **TraeWork / TRAE / TraeCode CLI / Cherry Studio / Cursor** 等
+把 **WorkBuddy / CodeBuddy 账号额度（国内版 + 国际版）** 与 **DeepSeek 官方网页/手机版账号**
+包装成本机上的 **OpenAI 兼容 + Anthropic 兼容** 接口，供 **TraeWork / TRAE / TraeCode CLI / Cherry Studio / Cursor** 等
 任意 OpenAI 兼容客户端当作「自定义模型」接入。
 
 > Turn your WorkBuddy (Tencent CodeBuddy) account quota — **both the China and the international
-> edition** — into a local, OpenAI- and Anthropic-compatible HTTP endpoint.
+> edition** — **and your DeepSeek official web/app account** into a local, OpenAI- and
+> Anthropic-compatible HTTP endpoint.
 > Zero dependencies, pure Node.js, loopback-only.
 
 - 依赖：仅需 **Node.js ≥ 18**，**零第三方依赖**，不用 npm install、不用 Docker。
-- 隔离：配置 / 凭证 / 日志全部落在**项目目录内**；登录走官方**设备授权（OAuth）**，
+- 隔离：配置 / 凭证 / 日志全部落在**项目目录内**；CodeBuddy 登录走官方**设备授权（OAuth）**，
   不读取 WorkBuddy 客户端的本地配置、浏览器数据或任何项目目录以外的文件。
 - 监听：默认只绑 `127.0.0.1:8788`，不对局域网/公网暴露，带本地 API Key 鉴权。
 - 多站点：国内版（`copilot.tencent.com`）与国际版（`codebuddy.ai` / `workbuddy.ai`）协议同构，
   一套服务同时代理、按模型自动路由；两边额度互不通用，各自登录。
+  另支持 **DeepSeek 官方站点**（`chat.deepseek.com`，见 §5.5，协议不同：PoW 工作量证明 + 单 prompt）。
 - 能力：流式 / 非流式、完整工具调用（tool_calls 流式聚合、多轮回灌）、
   `developer` 角色与 `tool_choice` 归一、accessToken 临期自动刷新、剩余积分与**积分倍率**查询。
+
+> ⚠️ 本分支（`deepseek`）包含 DeepSeek 官方站点接入的完整实现；main 分支不含。
 
 ---
 
@@ -34,16 +38,21 @@ workbuddy-openai-proxy/
 ├── start-hidden.cmd      # 双击启动（最小化窗口，后台常驻）
 ├── start-hidden.vbs      # 完全隐藏启动（桌面「启动反代」快捷方式用）
 ├── stop.cmd / status.cmd / login.cmd / login-intl.cmd / ask.cmd
+├── login-deepseek.mjs     # DeepSeek 官方站点 token 配置（粘贴式，见 §5.5）
 ├── config.example.json   # 配置样例（复制为 config.json 后按需修改）
 ├── LICENSE               # MIT
 ├── console/
 │   └── index.html        # 控制台界面（单文件、零依赖、中文界面）
 └── src/
-    ├── config.mjs        # 配置加载 + 站点表（国内版 / 国际版）
+    ├── config.mjs        # 配置加载 + 站点表（国内版 / 国际版 / DeepSeek 官方）
     ├── auth.mjs          # 多站点凭证存取 + 自动刷新（单飞）+ 运行中热加载
     ├── device-login.mjs  # 设备授权登录（CLI 与控制台共用）
     ├── headers.mjs       # 站点感知的上游请求头
     ├── upstream.mjs      # 上游聊天/模型/额度接口 + SSE 解析
+    ├── dispatch.mjs      # 上游分发层：按站点协议路由（CodeBuddy / DeepSeek）
+    ├── deepseek-pow.mjs  # DeepSeekHashV1 PoW 求解器（原像搜索，调用官方 wasm）
+    ├── deepseek.mjs      # DeepSeek 官方站点客户端（挑战/会话/补全/SSE/多轮压平）
+    ├── deepseek-adapter.mjs # DeepSeek SSE → OpenAI chunk 帧翻译
     ├── router.mjs        # 模型 → 站点 路由（default 别名 / 前缀 / 路由表 / 目录匹配）
     ├── openai.mjs        # /v1/models、/v1/chat/completions
     ├── anthropic.mjs     # /v1/messages、/v1/messages/count_tokens
@@ -63,6 +72,7 @@ workbuddy-openai-proxy/
 站点 cn-cli    已登录 uid=xxxxxxxx…   https://copilot.tencent.com
 站点 intl-cli  未登录                 https://www.codebuddy.ai
 站点 intl-work 未登录                 https://www.workbuddy.ai
+站点 deepseek  未登录                 https://chat.deepseek.com   （启用后显示）
 未登录的站点可用：node login.mjs --site <站点名>
 ```
 
@@ -293,6 +303,60 @@ node status.mjs --site intl-cli  # 只看某个站点
 { "id": "hy3", "site": "cn-cli", "credits": "x0.00 credits", "credits_multiplier": 0 }
 ```
 
+### 5.5 DeepSeek 官方站点（chat.deepseek.com，协议不同）
+
+> ⚠️ 本站点仅在 **`deepseek` 分支**提供，main 不含。
+
+除 CodeBuddy 两站点外，本项目还支持把 **DeepSeek 官方网页/手机版账号**（chat.deepseek.com）
+接入同一代理。它的协议与 CodeBuddy **完全不同**，由独立实现负责：
+
+| 维度 | CodeBuddy 站点 | DeepSeek 官方 |
+|---|---|---|
+| 端点 | `/v2/chat/completions` | `/api/v0/chat/completion` |
+| 入参 | `messages` 数组 | **单个 `prompt` 字符串**（多轮自动压平） |
+| 模型 | model ID | 无模型概念，靠开关组合 |
+| 登录 | OAuth 设备授权 + **自动刷新** | 浏览器粘贴 token，**无刷新端点** |
+| 反爬 | 无 | **PoW 工作量证明**（DeepSeekHashV1，已破解，见下） |
+| 工具调用 | 支持 | **不支持**（Trae Agent 模式不可用） |
+
+#### 配置三步
+
+```powershell
+# ① 拿 token：浏览器登录 chat.deepseek.com → F12 Console 执行：
+#    copy(JSON.parse(localStorage.getItem('userToken')).value)
+node login-deepseek.mjs        # ② 粘贴 token（自动校验，写入 auth.deepseek.json）
+# ③ config.json → sites.deepseek.enabled 改为 true，重启服务
+```
+
+#### 模型 ID（别名承载官方开关组合）
+
+| 模型 ID | 官方行为 |
+|---|---|
+| `deepseek/deepseek-chat` | 默认对话 |
+| `deepseek/deepseek-reasoner` | 深度思考（输出 `reasoning_content`） |
+| `deepseek/deepseek-search` | 联网搜索 |
+
+#### PoW（DeepSeekHashV1）已破解
+
+官方每次补全都要求先解一道工作量证明。本项目完整还原其算法并调用官方 wasm 求解：
+
+- **算法模型**：原像搜索 —— 服务端随机选 `n ∈ [0, difficulty)` 并下发
+  `challenge = dsHash(salt_expire_n)`；客户端枚举 n 找 `dsHash(prefix + n) === challenge`；
+  `difficulty` 是搜索上限（非阈值）。
+- **`dsHash` 是 DeepSeek 自定义哈希**（官方 wasm `wasm_deepseek_hash_v1` 实现，
+  64 hex 输出，**不是标准 SHA3-256**）。
+- **性能**：平均 100~150ms，最坏约 0.5s（difficulty=144000）。
+- 破解与验证全过程见 `DEEPSEEK-PoW结论修正.md`；抓包样本逐字符复现，
+  随机自造挑战 5/5 求解成功，线上服务端已实测接受。
+
+#### 限制与风险（务必阅读）
+
+- ❌ **不支持工具调用**：Trae 的 Agent 模式不可用，普通对话正常
+- ⚠️ **token 无自动刷新**：官方不存在刷新端点（已实测 8 个候选 + 翻前端 bundle 确认），
+  失效后重跑 `node login-deepseek.mjs` 粘贴新 token（30 秒）
+- ⚠️ **违反 DeepSeek 用户协议**：PoW 即官方反自动化措施，存在封号风险（错误码 `40012 USER_IS_BANNED`）
+- 完整手册：`DEEPSEEK-接入Trae手册.md`；协议细节与测试：`DEEPSEEK-反代可行性.md`
+
 ---
 
 ## 6. 常见问题
@@ -308,6 +372,9 @@ node status.mjs --site intl-cli  # 只看某个站点
 | 国际版报 401/500 但国内版正常 | 国际版是独立账号体系，需要单独 `--site intl-cli` / `--site intl-work` 登录 |
 | 模型回答被截断 | 上游「思考」也计入输出 token；在 TraeWork 高级配置里调大输出上下文窗口 |
 | TraeWork 里模型列表为空 | TraeWork 不拉 `/v1/models`，模型 ID 手填即可 |
+| DeepSeek 站点 401「token 无效或已过期」 | token 失效：浏览器重新取一次（Console 跑 `copy(JSON.parse(localStorage.getItem('userToken')).value)`），再跑 `node login-deepseek.mjs` 粘贴 |
+| DeepSeek 站点 `PoW 无解` | 挑战过期，重试即可；持续出现请更新 `_ds-pow/sha3_wasm_bg.wasm`（官方可能换算法） |
+| DeepSeek 站点模型回复为空 | 检查是否用了 `deepseek-reasoner`（思考内容不计入正文） |
 | 想换端口 / 换 Key | 改 `config.json` 后重启服务 |
 | 想关掉鉴权 | 把 `config.json` 的 `apiKey` 设为 `""`（仅本机使用时才可以） |
 
@@ -351,6 +418,10 @@ node status.mjs --site intl-cli  # 只看某个站点
 | `/v1/messages/count_tokens` | POST | token 估算 |
 | `/status` | GET | 各站点登录状态 + 剩余积分（`?site=intl-cli` 可只看一个站点） |
 | `/health` | GET | 健康检查（无需鉴权），含各站点登录态 |
+| `/console/api/login/token` | POST | DeepSeek 站点粘贴 token 登录（`{site:"deepseek", token}`；控制台专用） |
+
+> DeepSeek 站点走上面同一组 `/v1/*` 接口——把 `model` 写成 `deepseek/deepseek-chat` 等
+> 即自动路由到 DeepSeek 官方上游（见 §5.5）。
 
 带不带 `/v1` 前缀都能访问。鉴权：`Authorization: Bearer <apiKey>` 或 `x-api-key: <apiKey>`。
 
@@ -366,15 +437,23 @@ node status.mjs --site intl-cli  # 只看某个站点
 - ✅ 工具调用：流式聚合 `tool_calls`、`tool_choice` 对象→字符串归一、`developer` 角色→`system`
 - ✅ 多轮工具回灌（agent 形态：assistant.tool_calls → tool 结果 → 最终回答）
 - ✅ 剩余积分查询、动态模型清单、积分倍率展示
+- ✅ **DeepSeek 官方站点（`deepseek` 分支）**：DeepSeekHashV1 PoW 破解与求解（原像搜索，
+  平均 100~150ms）、多轮压平、SSE JSON-Patch 帧解析（快照+APPEND 增量）、
+  OpenAI/Anthropic 双协议转换、真机端到端实测通过（15 项）
 
 ---
 
 ## 10. 安全与合规
 
-- 仅监听 `127.0.0.1`；`auth.<站点>.json` 权限 0600，**不要外传**、不要提交仓库（`.gitignore` 已忽略）。
+- 仅监听 `127.0.0.1`；`auth.<站点>.json` 权限 0600，**不要外传**、不要提交仓库（`.gitignore` 已忽略；
+  DeepSeek 相关的 `.ds-token` / `auth.deepseek.json` 同样已忽略）。
 - 走的是 **CodeBuddy 官方 CLI 所用的非公开接口**，无官方文档、可能随时变更；本项目只做本机自用转发。
 - 请仅用于**本人账号**，遵守腾讯 CodeBuddy / WorkBuddy 用户协议；额度规则与风控由上游决定。
 - 本项目与腾讯无任何关联，未获官方授权或认可，请自行评估使用风险。
+- **DeepSeek 官方站点额外风险**：逆向 `chat.deepseek.com` 接口并绕过其 PoW（工作量证明）
+  违反 DeepSeek 用户协议，PoW 本身即官方反自动化措施，**存在封号风险**（错误码 `40012 USER_IS_BANNED`）。
+  官方接口无公开文档，算法/端点随时可能变更导致失效（本实现基于 2026-09 抓包的
+  `sha3_wasm_bg.7b9ca65ddd.wasm`）。请仅限本人账号自用，勿外传、勿商用。
 
 ---
 
