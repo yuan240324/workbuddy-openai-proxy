@@ -185,7 +185,13 @@ async function api(path, opts = {}) {
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  if (!res.ok) throw new Error(json.error || ('HTTP ' + res.status));
+  if (!res.ok) {
+    const err = new Error(json.error || ('HTTP ' + res.status));
+    // 把后端标记（如 need_token）带到 Error 上，便于调用方分支处理
+    if (json.need_token) err.needToken = true;
+    if (json.hint) err.hint = json.hint;
+    throw err;
+  }
   return json;
 }
 
@@ -363,12 +369,44 @@ function renderAccounts() {
 
 async function startLogin(site) {
   loginSite = site;
-  const r = await api('/login/start', { method: 'POST', body: { site } });
+  let r;
+  try {
+    r = await api('/login/start', { method: 'POST', body: { site } });
+  } catch (e) {
+    // DeepSeek 官方站点没有设备授权流程，改用「粘贴 token」
+    if (e.needToken) {
+      return promptTokenLogin(site, e.hint);
+    }
+    throw e;
+  }
   $('loginBox').classList.remove('hidden');
   $('loginUrl').textContent = r.authUrl;
   $('loginMsg').textContent = '等待授权…';
   openLoginUrl();
   pollLogin();
+}
+
+// DeepSeek 官方站点：粘贴 token 登录
+async function promptTokenLogin(site, hint) {
+  const token = window.prompt(
+    `【${site}】需要粘贴 token\n\n` +
+      '取法：浏览器登录 chat.deepseek.com → F12 → Console（如被拦先输入「允许粘贴」）→ 执行：\n' +
+      "JSON.parse(localStorage.getItem('userToken')).value\n\n" +
+      (hint ? '提示：' + hint + '\n\n' : '') +
+      '把 token 粘贴到这里：',
+  );
+  if (!token || !token.trim()) return;
+  try {
+    const r = await api('/login/token', { method: 'POST', body: { site, token: token.trim() } });
+    $('loginBox').classList.remove('hidden');
+    $('loginUrl').textContent = '（token 登录，无需跳转）';
+    $('loginMsg').innerHTML = `<span class="pill ok">登录成功</span> ${esc(r.account || '')}`;
+    await loadState();
+    renderAccounts();
+  } catch (e) {
+    $('loginBox').classList.remove('hidden');
+    $('loginMsg').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+  }
 }
 
 function openLoginUrl() { window.open($('loginUrl').textContent, '_blank'); }

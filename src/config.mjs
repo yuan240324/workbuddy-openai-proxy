@@ -74,7 +74,31 @@ export const SITE_PRESETS = {
     // 登录后可自行补充实测可用的模型 ID
     seedModels: [{ id: 'auto', name: 'Auto（上游自动路由）' }],
   },
+  // DeepSeek 官方 App/网页版。协议与 CodeBuddy 完全不同（PoW + /api/v0/*），
+  // 由 src/deepseek.mjs 单独实现，protocol 字段用于分发。
+  deepseek: {
+    label: 'DeepSeek 官方（chat.deepseek.com）',
+    enabled: false, // 未配置 token 前默认关闭，避免占用路由
+    protocol: 'deepseek',
+    apiBase: 'https://chat.deepseek.com',
+    origin: 'https://chat.deepseek.com',
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+      '(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 Edg/152.0.0.0',
+    // 官方 Web 端只有两个模式：默认（含深度思考开关）与联网搜索。
+    // 模型 ID 在页面上不暴露，这里用可读别名映射到 model_type / 开关组合。
+    seedModels: [
+      { id: 'deepseek-chat', name: 'DeepSeek（官方默认）' },
+      { id: 'deepseek-reasoner', name: 'DeepSeek（深度思考）' },
+      { id: 'deepseek-search', name: 'DeepSeek（联网搜索）' },
+    ],
+  },
 };
+
+/** 是否为 DeepSeek 官方站点（协议不同，需走独立实现）。 */
+export function isDeepSeekSite(site) {
+  return site?.protocol === 'deepseek';
+}
 
 // 默认模型清单（config.json 缺失时的兜底；真实可用清单以 GET /v1/models 实时拉取为准）
 export const DEFAULT_MODELS = [

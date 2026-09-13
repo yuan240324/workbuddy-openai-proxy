@@ -1,6 +1,8 @@
 // Anthropic 兼容路由：/v1/messages、/v1/messages/count_tokens
 // Trae 的「Claude 型自定义模型」走 Anthropic Messages 协议，这里做双向转换。
-import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
+import { aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
+import { openUpstream } from './dispatch.mjs';
+import { isDeepSeekSite } from './config.mjs';
 import { ensureToken } from './auth.mjs';
 import { resolveTarget } from './router.mjs';
 import { recordUsage } from './usage.mjs';
@@ -129,15 +131,15 @@ export async function handleMessages(ctx) {
   const openaiBody = toOpenAIBody({ ...body, model });
   if (openaiBody.max_tokens === undefined) openaiBody.max_tokens = cfg.defaultMaxTokens;
 
-  let up = await openChat(cfg, site, openaiBody, { signal });
-  if (!up.ok && up.status === 401) {
+  let up = await openUpstream(cfg, site, openaiBody, { signal });
+  if (!up.ok && up.status === 401 && !isDeepSeekSite(cfg.sites?.[site])) {
     warn(`[${site}] 上游 401，强制刷新 token 后重试一次`);
     try {
       await ensureToken(cfg, site, { force: true });
     } catch (e) {
       warn(`[${site}] 刷新 token 失败：`, e.message);
     }
-    up = await openChat(cfg, site, openaiBody, { signal });
+    up = await openUpstream(cfg, site, openaiBody, { signal });
   }
   if (!up.ok) {
     requestLog({ site, model, mode: wantsStream ? 'anthropic-stream' : 'anthropic-json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });
@@ -157,7 +159,7 @@ export async function handleMessages(ctx) {
     const askedMax = Number(body.max_tokens ?? 0);
     if (!agg.content && agg.toolCallList.length === 0 && askedMax > 0 && askedMax < 1024) {
       warn(`[${site}] 空回答（finish=${agg.finishReason}，max_tokens=${askedMax}），放大到 1024 重试一次`);
-      const up2 = await openChat(cfg, site, { ...openaiBody, max_tokens: Math.max(1024, askedMax * 4) }, { signal });
+      const up2 = await openUpstream(cfg, site, { ...openaiBody, max_tokens: Math.max(1024, askedMax * 4) }, { signal });
       if (up2.ok) {
         try {
           agg = await aggregateFrames(up2.frames);

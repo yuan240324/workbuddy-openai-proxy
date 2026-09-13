@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "payload": {
+    "algorithm": "DeepSeekHashV1",
+    "challenge": "2710c2f9d32645e18a18c2d6ae2a2e8eed1d079ad5a773861b8c8913be87b722",
+    "salt": "ccd2d20978f6b8697919",
+    "answer": 27720,
+    "signature": "c0ac58cab9eeaf914f53bba9033f23657706c34d494346eadf955153220cd8c8",
+    "target_path": "/api/v0/chat/completion"
+  },
+  "prefix": "ccd2d20978f6b8697919_1789247493602_"
+}

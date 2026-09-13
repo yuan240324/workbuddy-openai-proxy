@@ -1,0 +1,81 @@
+[
+  "[event] event: ready",
+  {
+    "request_message_id": 1,
+    "response_message_id": 2,
+    "model_type": "default"
+  },
+  "[event] event: update_session",
+  {
+    "updated_at": 1789257257.776687
+  },
+  {
+    "v": {
+      "response": {
+        "message_id": 2,
+        "parent_id": 1,
+        "model": "",
+        "role": "ASSISTANT",
+        "thinking_enabled": false,
+        "ban_edit": false,
+        "ban_regenerate": false,
+        "status": "WIP",
+        "incomplete_message": null,
+        "accumulated_token_usage": 0,
+        "feedback": null,
+        "inserted_at": 1789257257.7625718,
+        "search_enabled": false,
+        "fragments": [
+          {
+            "id": 2,
+            "type": "RESPONSE",
+            "content": "你好",
+            "references": [],
+            "stage_id": 1
+          }
+        ],
+        "conversation_mode": "DEFAULT",
+        "has_pending_fragment": false,
+        "auto_continue": false,
+        "search_triggered": false
+      }
+    }
+  },
+  {
+    "p": "response/fragments/-1/content",
+    "o": "APPEND",
+    "v": "啊"
+  },
+  {
+    "p": "response",
+    "o": "BATCH",
+    "v": [
+      {
+        "p": "accumulated_token_usage",
+        "v": 40
+      },
+      {
+        "p": "quasi_status",
+        "v": "FINISHED"
+      }
+    ]
+  },
+  {
+    "p": "response/status",
+    "o": "SET",
+    "v": "FINISHED"
+  },
+  "[event] event: update_session",
+  {
+    "updated_at": 1789257257.9580538
+  },
+  "[event] event: title",
+  {
+    "content": "回应问候"
+  },
+  "[event] event: close",
+  {
+    "click_behavior": "none",
+    "auto_resume": false
+  }
+]

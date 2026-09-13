@@ -1,8 +1,9 @@
 // 站点路由：把「模型名」映射到「哪个站点 + 该站点上的模型 ID」。
 // 规则优先级：显式站点前缀 → 别名 → config.modelRoutes → 站点目录匹配（倍率最低优先） → 默认站点。
-import { siteKeys } from './config.mjs';
+import { siteKeys, isDeepSeekSite } from './config.mjs';
 import { isLoggedIn } from './auth.mjs';
 import { fetchModels } from './upstream.mjs';
+import { deepseekModels } from './deepseek-adapter.mjs';
 
 const TTL_OK = 5 * 60 * 1000;
 const TTL_ERR = 60 * 1000;
@@ -24,6 +25,13 @@ export async function getCatalog(cfg, site, { force = false } = {}) {
 
   if (!isLoggedIn(site)) {
     const entry = { at: Date.now(), ttl: TTL_ERR, models: new Map(), error: '未登录', source: 'none' };
+    catalogs.set(site, entry);
+    return entry;
+  }
+  // DeepSeek 官方站点没有可拉取的模型目录接口，直接用站点预设清单
+  if (isDeepSeekSite(cfg.sites?.[site])) {
+    const models = new Map(deepseekModels(cfg, site).map((m) => [m.id, m]));
+    const entry = { at: Date.now(), ttl: TTL_OK, models, error: null, source: 'seed' };
     catalogs.set(site, entry);
     return entry;
   }
