@@ -5,6 +5,9 @@ config.json
 usage.json
 .login-state.json
 .gh-token
+# DeepSeek 官方站点凭证（token 明文，切勿提交）
+.ds-token
+auth.deepseek.json
 node_modules/
 *.log
 _ref/
