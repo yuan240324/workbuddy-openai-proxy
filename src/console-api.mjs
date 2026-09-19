@@ -13,6 +13,21 @@ import { sendJson } from './util.mjs';
 const startedAt = Date.now();
 const loginStates = new Map(); // site → { state, authUrl, at }
 
+// 简单的每 IP 速率限制：防止本机可达的恶意页面/脚本高频调用（尤其是较重的 /probe）
+// 拖垮服务或打爆上游（CWE-770：资源消耗未加限制）。
+const RATE_LIMIT_WINDOW_MS = 10_000;
+const RATE_LIMIT_MAX = 30;
+const rateLimitHits = new Map(); // ip → timestamps[]
+
+function isRateLimited(req) {
+  const ip = req.socket?.remoteAddress || 'unknown';
+  const now = Date.now();
+  const hits = (rateLimitHits.get(ip) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  hits.push(now);
+  rateLimitHits.set(ip, hits);
+  return hits.length > RATE_LIMIT_MAX;
+}
+
 function maskKey(k) {
   if (!k) return '';
   return k.length <= 10 ? '***' : k.slice(0, 6) + '…' + k.slice(-4);
@@ -70,6 +85,7 @@ async function probeModel(cfg, site, model) {
 
 export async function handleConsoleApi(ctx) {
   const { cfg, req, res, url } = ctx;
+  if (isRateLimited(req)) return sendJson(res, 429, { error: '请求过于频繁，请稍后再试' });
   const p = url.pathname.replace(/^\/console\/api/, '') || '/';
   const method = req.method;
 
