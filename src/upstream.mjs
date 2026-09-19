@@ -110,18 +110,38 @@ export async function openChat(cfg, site, body, { signal } = {}) {
     idleTimer = setTimeout(() => ac.abort(new Error('upstream idle timeout')), cfg.timeouts.idleMs);
   };
 
+  // 连接级失败自动重试：国际版（codebuddy.ai）实测约有 17% 的 ECONNRESET / socket 抖动，
+  // 这类瞬时网络错误重试一两次即可恢复。只重试「连接建立/传输」错误，
+  // 不重试 HTTP 业务错误，也不重试客户端主动断开（那是用户取消）。
+  const 最大尝试 = Number(cfg.upstreamRetry?.attempts ?? 3);
+  const 退避 = Array.isArray(cfg.upstreamRetry?.backoffMs) ? cfg.upstreamRetry.backoffMs : [400, 1000];
   let res;
-  try {
-    res = await fetch(siteCfg.apiBase + '/v2/chat/completions', {
-      method: 'POST',
-      headers: chatHeaders(siteCfg, auth),
-      body: JSON.stringify(payload),
-      signal: ac.signal,
-    });
-  } catch (e) {
+  let 最后错误;
+  for (let 尝试 = 1; 尝试 <= 最大尝试; 尝试++) {
+    try {
+      res = await fetch(siteCfg.apiBase + '/v2/chat/completions', {
+        method: 'POST',
+        headers: chatHeaders(siteCfg, auth),
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+      最后错误 = null;
+      break;
+    } catch (e) {
+      最后错误 = e;
+      const 客户端取消 = signal?.aborted || /client closed/i.test(String(e?.message || ''));
+      if (客户端取消) break; // 用户取消，不重试
+      if (尝试 < 最大尝试) {
+        warn(`[${site}] 连接失败（${e?.cause?.code || e?.message || e}），第 ${尝试} 次重试…`);
+        await new Promise((r) => setTimeout(r, 退避[Math.min(尝试 - 1, 退避.length - 1)] ?? 500));
+      }
+    }
+  }
+  if (!res) {
     clearTimeout(headerTimer);
     cleanup();
-    throw new UpstreamError(`[${site}] 上游连接失败：${e?.message || e}`, { status: 504, transport: true, site });
+    const 原因 = 最后错误?.cause?.code || 最后错误?.message || 最后错误;
+    throw new UpstreamError(`[${site}] 上游连接失败（已重试 ${最大尝试} 次）：${原因}`, { status: 504, transport: true, site });
   }
   clearTimeout(headerTimer);
 
@@ -247,6 +267,22 @@ export async function aggregateFrames(frames) {
 }
 
 /**
+ * 描述一次 fetch 失败的原因。
+ *
+ * 为什么要区分：超时（AbortError）与其他失败（URL 非法、DNS 失败、连接被拒）
+ * 是完全不同的问题，混在一句「超时或网络异常」里会把排查方向带偏——
+ * 例如站点漏配 billingBase 会拼出 undefined/... 的非法 URL，
+ * 那属于配置错误，不是网络抖动。
+ */
+function describeFetchFailure(e, timeoutMs) {
+  const msg = String(e?.message || e);
+  const isTimeout = e?.name === 'AbortError' || /timeout|aborted/i.test(msg);
+  if (isTimeout) return `${Math.round(timeoutMs / 1000)}s 超时`;
+  if (/Failed to parse URL|Invalid URL/i.test(msg)) return `URL 无效（多半是站点配置缺少 apiBase / billingBase）：${msg}`;
+  return `网络异常：${msg}`;
+}
+
+/**
  * 带超时的 fetch（用于非流式的元数据接口：模型列表 / 额度查询）。
  *
  * 为什么需要：这些接口原先既无 signal 也无超时，上游挂起时请求会永久悬挂，
@@ -302,7 +338,7 @@ export async function fetchModels(cfg, site) {
     res = r.res;
     text = await r.text();
   } catch (e) {
-    throw new UpstreamError(`[${site}] 模型接口请求失败（${Math.round(timeoutMs / 1000)}s 超时或网络异常）：${e?.message || e}`, { status: 504, transport: true, site });
+    throw new UpstreamError(`[${site}] 模型接口请求失败（${describeFetchFailure(e, timeoutMs)}）`, { status: 504, transport: true, site });
   }
   if (res.status !== 200) throw new UpstreamError(`[${site}] 模型接口 HTTP ${res.status}：${text.slice(0, 200)}`, { status: res.status, site });
   let json;
@@ -330,9 +366,28 @@ export async function fetchModels(cfg, site) {
     }));
 }
 
+/**
+ * 该站点是否支持额度查询。
+ *
+ * 没有配置 billingBase 的站点不使用 CodeBuddy 的计费接口，
+ * 站点预设里本就没有该字段。此时不应发起查询——否则会拼出
+ * "undefined/v2/billing/meter/get-user-resource" 这种无效 URL，
+ * 还会被当作网络故障上报，把「该站点不适用」误报成「超时」。
+ */
+export function supportsCreditQuery(cfg, site) {
+  const b = cfg.sites?.[site]?.billingBase;
+  return typeof b === 'string' && b.trim().length > 0;
+}
+
 /** 查询站点剩余积分（免费额度）。国际版计费口径不同，失败时静默返回错误信息。 */
 export async function queryCredit(cfg, site) {
   const siteCfg = cfg.sites[site];
+  if (!supportsCreditQuery(cfg, site)) {
+    throw new UpstreamError(
+      `[${site}] 该站点不支持额度查询（协议与 CodeBuddy 不同，未配置 billingBase）`,
+      { status: 501, site },
+    );
+  }
   const auth = getAuth(site);
   await ensureToken(cfg, site);
   const now = new Date();
@@ -358,7 +413,7 @@ export async function queryCredit(cfg, site) {
     res = r.res;
     text = await r.text();
   } catch (e) {
-    throw new UpstreamError(`[${site}] 额度接口请求失败（${Math.round(timeoutMs / 1000)}s 超时或网络异常）：${e?.message || e}`, { status: 504, transport: true, site });
+    throw new UpstreamError(`[${site}] 额度接口请求失败（${describeFetchFailure(e, timeoutMs)}）`, { status: 504, transport: true, site });
   }
   let json;
   try {

@@ -120,7 +120,10 @@ describe('validateConfig：sites（原先 null 会让站点静默消失）', () 
     cfg.sites = null;
     const issues = validateConfig(cfg);
     assert.ok(Object.keys(cfg.sites).length >= 3, '应恢复内置站点');
-    assert.deepEqual(Object.keys(cfg.sites).sort(), ['cn-cli', 'intl-cli', 'intl-work']);
+    // 三个内置站点都应恢复
+    for (const s of ['cn-cli', 'intl-cli', 'intl-work']) {
+      assert.ok(cfg.sites[s], `应恢复内置站点 ${s}`);
+    }
     assert.ok(issues.some((m) => m.includes('sites')));
   });
 

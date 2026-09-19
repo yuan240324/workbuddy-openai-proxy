@@ -17,6 +17,48 @@ export function parseMultiplier(credits) {
   return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
 }
 
+/**
+ * 模型白/黑名单（都支持 `*` 通配符，站点级 + 全局两处配置）：
+ *   - allowModels 非空时，只保留命中的模型（白名单优先）
+ *   - excludeModels 命中即剔除
+ * 被剔除的模型不会出现在 /v1/models，也不允许被调用。
+ */
+export function isExcluded(cfg, site, id) {
+  const 命中 = (p, v) => (p.endsWith('*') ? String(v).startsWith(p.slice(0, -1)) : p === v);
+  const allow = [...(cfg.allowModels || []), ...(cfg.sites?.[site]?.allowModels || [])];
+  if (allow.length && !allow.some((p) => 命中(p, id))) return true;
+  const deny = [...(cfg.excludeModels || []), ...(cfg.sites?.[site]?.excludeModels || [])];
+  return deny.some((p) => 命中(p, id));
+}
+
+/**
+ * 说明某模型为何不可用，用于给出准确的错误提示；返回 null 表示可用。
+ *
+ * 为什么要单独说明：isExcluded 同时管 allowModels 白名单与 excludeModels 黑名单，
+ * 但原先的错误信息一律说「在剔除名单里（excludeModels）」。
+ * 当真正原因是白名单没命中时（excludeModels 其实是空的），
+ * 用户会被引去改一个无关的配置项，白费时间。
+ */
+export function explainExcluded(cfg, site, id) {
+  const 命中 = (p, v) => (p.endsWith('*') ? String(v).startsWith(p.slice(0, -1)) : p === v);
+  const allow = [...(cfg.allowModels || []), ...(cfg.sites?.[site]?.allowModels || [])];
+  if (allow.length && !allow.some((p) => 命中(p, id))) {
+    return `不在 allowModels 白名单里（当前白名单：${allow.join('、')}）`;
+  }
+  const deny = [...(cfg.excludeModels || []), ...(cfg.sites?.[site]?.excludeModels || [])];
+  if (deny.some((p) => 命中(p, id))) {
+    return `命中 excludeModels 黑名单（当前黑名单：${deny.join('、')}）`;
+  }
+  return null;
+}
+
+/** 展开别名（支持链式，最多 5 层），解析不了就原样返回。 */
+function expandAlias(cfg, name, depth = 0) {
+  const alias = cfg.modelAliases?.[name];
+  if (!alias || depth >= 5) return name;
+  return expandAlias(cfg, String(alias), depth + 1);
+}
+
 /** 取站点模型目录（带缓存）。动态接口不可用时回落到站点内置清单（seedModels）。 */
 export async function getCatalog(cfg, site, { force = false } = {}) {
   const cached = catalogs.get(site);
@@ -27,9 +69,11 @@ export async function getCatalog(cfg, site, { force = false } = {}) {
     catalogs.set(site, entry);
     return entry;
   }
+  const 过滤 = (list) =>
+    new Map(list.filter((m) => !isExcluded(cfg, site, m.id)).map((m) => [m.id, m]));
   try {
     const list = await fetchModels(cfg, site);
-    const entry = { at: Date.now(), ttl: TTL_OK, models: new Map(list.map((m) => [m.id, m])), error: null, source: 'upstream' };
+    const entry = { at: Date.now(), ttl: TTL_OK, models: 过滤(list), error: null, source: 'upstream' };
     catalogs.set(site, entry);
     return entry;
   } catch (e) {
@@ -42,7 +86,7 @@ export async function getCatalog(cfg, site, { force = false } = {}) {
     }
     // 动态目录不可用（如国际版控制台接口被网关限制）→ 用站点内置清单兜底
     const seed = cfg.sites[site]?.seedModels || [];
-    const models = new Map(seed.map((m) => [m.id, { ...m, seed: true }]));
+    const models = 过滤(seed.map((m) => ({ ...m, seed: true })));
     const entry = {
       at: Date.now(),
       ttl: models.size ? TTL_ERR : TTL_OK,
@@ -64,7 +108,45 @@ function splitPrefix(cfg, raw) {
   return null;
 }
 
-/** 解析请求里的模型 → { site, model, requested }。 */
+/**
+ * 若 raw 形如 `站点/模型`、且该站点存在但已被禁用，返回站点名；否则返回 null。
+ *
+ * 为什么要单独识别：splitPrefix 对已禁用站点返回 null，
+ * 于是 `站点/模型` 会被整体当成模型名继续往下走，
+ * 最后报成「不在 allowModels 白名单里」——真正的原因是站点被禁用了，
+ * 提示把人引向完全无关的配置项。
+ */
+function disabledSitePrefix(cfg, raw) {
+  const s = String(raw);
+  const slash = s.indexOf('/');
+  if (slash <= 0) return null;
+  const head = s.slice(0, slash);
+  const site = cfg.sites?.[head];
+  return site && site.enabled === false ? head : null;
+}
+
+/** 构造「站点已禁用」的错误。 */
+function disabledSiteError(site, raw) {
+  return Object.assign(
+    new Error(`站点 ${site} 已禁用（config.json 的 sites.${site}.enabled = false），${raw} 不可用。如需启用请改为 true 并重启服务`),
+    { status: 404 },
+  );
+}
+
+/** 计算备用站点：除了「首选站点」以外，还有哪些站点真的拥有该模型（按倍率升序）。 */
+async function computeFallback(cfg, 首选站点, 目标模型) {
+  const 备选 = [];
+  for (const s of siteKeys(cfg)) {
+    if (s === 首选站点) continue;
+    const cat = await getCatalog(cfg, s);
+    const info = cat.models.get(目标模型);
+    if (info) 备选.push({ site: s, mult: parseMultiplier(info.credits) });
+  }
+  备选.sort((a, b) => a.mult - b.mult || (a.site === cfg.defaultSite ? -1 : 1));
+  return 备选.length ? { site: 备选[0].site, model: 目标模型 } : null;
+}
+
+/** 解析请求里的模型 → { site, model, requested, fallback? }。 */
 export async function resolveTarget(cfg, requestedModel) {
   let raw = String(requestedModel || '').trim();
   const sites = siteKeys(cfg);
@@ -72,42 +154,100 @@ export async function resolveTarget(cfg, requestedModel) {
 
   // 0) 特殊别名：客户端只配一个 `default` 模型，之后切换模型全在控制台完成
   if (raw.toLowerCase() === 'default' || raw.toLowerCase() === 'current') {
-    raw = cfg.modelAliases?.[raw] || cfg.defaultModel;
+    raw = expandAlias(cfg, raw) === raw ? cfg.defaultModel : expandAlias(cfg, raw);
   }
 
-  // 1) 显式站点前缀：intl-cli/glm-5.3、cn-cli/hy3
+  // 0.5) 站点存在但已禁用：明确报出真实原因，不要当成模型名继续往下走
+  const 禁用站点 = disabledSitePrefix(cfg, raw);
+  if (禁用站点) throw disabledSiteError(禁用站点, raw);
+
+  // 1) 显式站点前缀：`站点/模型`。前缀后面也可能是个别名（如 intl-cli/claude），需要再展开
   const direct = splitPrefix(cfg, raw);
-  if (direct) return { site: direct.site, model: direct.model, requested: raw };
+  if (direct) {
+    const 展开 = expandAlias(cfg, direct.model);
+    const 再前缀 = splitPrefix(cfg, 展开);
+    const site = 再前缀 ? 再前缀.site : direct.site;
+    const model = 再前缀 ? 再前缀.model : 展开;
+    if (isExcluded(cfg, site, model)) {
+      throw Object.assign(new Error(`模型 ${model} 在 ${site} 站点不可用：${explainExcluded(cfg, site, model)}`), { status: 404 });
+    }
+    return { site, model, requested: raw, fallback: await computeFallback(cfg, site, model) };
+  }
 
   // 2) 别名映射（别名值本身也可以是 `站点/模型`）
-  const alias = cfg.modelAliases?.[raw];
-  const viaAlias = alias ? splitPrefix(cfg, String(alias)) : null;
-  if (viaAlias) return { site: viaAlias.site, model: viaAlias.model, requested: raw };
-  const model = alias || raw;
+  const model = expandAlias(cfg, raw);
+  // 别名可能指向一个已禁用的站点，同样要报出真实原因
+  const 别名禁用 = disabledSitePrefix(cfg, model);
+  if (别名禁用) throw disabledSiteError(别名禁用, model);
+  const viaAlias = splitPrefix(cfg, model);
+  const 目标站点 = viaAlias ? viaAlias.site : null;
+  const 目标模型 = viaAlias ? viaAlias.model : model;
+  if (目标站点) {
+    if (isExcluded(cfg, 目标站点, 目标模型)) {
+      throw Object.assign(new Error(`模型 ${目标模型} 在 ${目标站点} 站点不可用：${explainExcluded(cfg, 目标站点, 目标模型)}`), { status: 404 });
+    }
+    return { site: 目标站点, model: 目标模型, requested: raw, fallback: await computeFallback(cfg, 目标站点, 目标模型) };
+  }
 
-  // 3) 显式路由表
-  const route = cfg.modelRoutes?.[model];
-  if (route && cfg.sites?.[route]) return { site: route, model, requested: raw };
+  // 3) 显式路由表（用户刻意把某些模型钉到某个站点，例如为了走国际版）。
+  //    只有在「目标站点拿到了真实的动态目录、且目录里明确没有这个模型」时才忽略该路由；
+  //    内置清单（seed）本身不完整，不能用它否定路由表，否则会误判（把国际版能用但没列进
+  //    清单的模型错误地打回国内版）。
+  const route = cfg.modelRoutes?.[目标模型];
+  if (route && cfg.sites?.[route]) {
+    const routeCat = await getCatalog(cfg, route);
+    const 目录可信 = String(routeCat.source || '').startsWith('upstream');
+    if (目录可信 && !routeCat.models.has(目标模型)) {
+      if (process.env.WB_ROUTE_DEBUG) {
+        console.log(`[调试] 路由表把 ${目标模型} 钉到 ${route}，但该站点动态目录里没有它 → 忽略该路由，改为自动选站点`);
+      }
+    } else {
+      if (isExcluded(cfg, route, 目标模型)) {
+        throw Object.assign(new Error(`模型 ${目标模型} 在 ${route} 站点不可用：${explainExcluded(cfg, route, 目标模型)}`), { status: 404 });
+      }
+      // 备用站点：万一目标站点其实没有这个模型（内置清单不全，事先判断不出），
+      // 上游会回 "service info not found"；或者目标站点网络抖动导致连接失败（504），
+      // 届时据此自动降级重试一次。
+      return {
+        site: route,
+        model: 目标模型,
+        requested: raw,
+        fallback: await computeFallback(cfg, route, 目标模型),
+      };
+    }
+  }
 
   // 4) 目录匹配：多站点都有该模型时，选倍率最低的（未知倍率排最后）
   const hits = [];
+  if (process.env.WB_ROUTE_DEBUG) console.log('[调试] 目标模型=' + 目标模型 + '　站点列表=' + sites.join(','));
   for (const s of sites) {
     const cat = await getCatalog(cfg, s);
-    const info = cat.models.get(model);
+    const info = cat.models.get(目标模型);
+    if (process.env.WB_ROUTE_DEBUG) console.log('[调试]   ' + s + ' 目录' + cat.models.size + '个(来源' + cat.source + ') 命中=' + (info ? '是' : '否') + (info ? ' 倍率=' + info.credits + '→' + parseMultiplier(info.credits) : ''));
     if (info) hits.push({ site: s, mult: parseMultiplier(info.credits) });
   }
+  if (process.env.WB_ROUTE_DEBUG) console.log('[调试] 命中集合=' + JSON.stringify(hits));
   if (hits.length) {
     hits.sort((a, b) => a.mult - b.mult || (a.site === cfg.defaultSite ? -1 : 1));
-    return { site: hits[0].site, model, requested: raw };
+    if (process.env.WB_ROUTE_DEBUG) console.log('[调试] 排序后=' + JSON.stringify(hits) + ' → 选 ' + hits[0].site);
+    return { site: hits[0].site, model: 目标模型, requested: raw };
   }
 
-  return { site: cfg.defaultSite, model, requested: raw };
+  // 5) 兜底：默认站点。若该模型被全局剔除，直接报错而不是发一个注定失败的请求
+  if (isExcluded(cfg, cfg.defaultSite, 目标模型)) {
+    throw Object.assign(
+      new Error(`模型 ${目标模型} 不可用：${explainExcluded(cfg, cfg.defaultSite, 目标模型)}（检查 config.json 的 allowModels / excludeModels）`),
+      { status: 404 },
+    );
+  }
+  return { site: cfg.defaultSite, model: 目标模型, requested: raw };
 }
 
 /**
  * 合并所有站点目录，供 GET /v1/models 使用：
- *   - 裸 ID：只出现一次，取倍率最低的站点
- *   - 前缀 ID（site/model）：每个拥有该模型的站点各一条，便于客户端固定站点
+ *   - 只输出裸模型 ID（同名模型取倍率最低的站点），保证客户端（CCSM / Codex 等）拿到的是干净可用的名字
+ *   - 需要同时暴露 `站点/模型` 变体时，把 config.json 的 exposeSitePrefixed 设为 true
+ *     （带斜杠的 ID 部分客户端不认，默认关闭；路由上的前缀写法始终可用）
  */
 export async function mergedModels(cfg) {
   const sites = siteKeys(cfg);
@@ -117,10 +257,12 @@ export async function mergedModels(cfg) {
     for (const m of cat.models.values()) {
       const mult = parseMultiplier(m.credits);
       const cur = byId.get(m.id);
-      if (!cur) byId.set(m.id, { info: m, best: s, bestMult: mult, sites: [{ site: s, mult }] });
-      else {
+      if (!cur) {
+        byId.set(m.id, { info: m, best: s, bestMult: mult, sites: [{ site: s, mult }] });
+      } else {
         cur.sites.push({ site: s, mult });
-        if (mult < cur.bestMult) {
+        // 同倍率时优先默认站点
+        if (mult < cur.bestMult || (mult === cur.bestMult && s === cfg.defaultSite)) {
           cur.best = s;
           cur.bestMult = mult;
         }
@@ -130,6 +272,7 @@ export async function mergedModels(cfg) {
   const out = [];
   for (const [id, v] of byId) {
     out.push({ id, site: v.best, info: v.info, mult: v.bestMult });
+    if (!cfg.exposeSitePrefixed) continue;
     for (const alt of v.sites) {
       if (alt.site === v.best) continue;
       out.push({ id: `${alt.site}/${id}`, site: alt.site, info: v.info, mult: alt.mult, aliasOf: id });

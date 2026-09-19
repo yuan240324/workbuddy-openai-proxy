@@ -3,6 +3,7 @@
 import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
 import { resolveTarget } from './router.mjs';
+import { isModelNotFound, isTransportFailure, isGatewayError } from './openai.mjs';
 import { recordUsage } from './usage.mjs';
 import { startSSE, writeSSEEvent, sendJson, sendError, writeAsync, estimateTokens } from './util.mjs';
 import { requestLog, warn } from './log.mjs';
@@ -125,19 +126,55 @@ export async function handleMessages(ctx) {
   const wantsStream = body.stream === true; // 与 Anthropic 规范一致：缺省为非流式
   const started = Date.now();
   const target = await resolveTarget(cfg, publicModel);
-  const { site, model } = target;
+  let { site, model } = target;
   const openaiBody = toOpenAIBody({ ...body, model });
   if (openaiBody.max_tokens === undefined) openaiBody.max_tokens = cfg.defaultMaxTokens;
 
-  let up = await openChat(cfg, site, openaiBody, { signal });
-  if (!up.ok && up.status === 401) {
-    warn(`[${site}] 上游 401，强制刷新 token 后重试一次`);
-    try {
-      await ensureToken(cfg, site, { force: true });
-    } catch (e) {
-      warn(`[${site}] 刷新 token 失败：`, e.message);
+  // 请求上游（含 401 刷新重试）；连接级失败时降级到备用站点
+  const 打开一次 = async () => {
+    let u = await openChat(cfg, site, openaiBody, { signal });
+    if (!u.ok && u.status === 401) {
+      warn(`[${site}] 上游 401，强制刷新 token 后重试一次`);
+      try {
+        await ensureToken(cfg, site, { force: true });
+      } catch (e) {
+        warn(`[${site}] 刷新 token 失败：`, e.message);
+      }
+      u = await openChat(cfg, site, openaiBody, { signal });
     }
-    up = await openChat(cfg, site, openaiBody, { signal });
+    return u;
+  };
+
+  let up;
+  try {
+    up = await 打开一次();
+  } catch (e) {
+    if (target.fallback && isTransportFailure(e) && !signal?.aborted) {
+      warn(`[${site}] 连接失败（${e?.cause?.code || e?.message}），自动降级到备用站点 ${target.fallback.site} 重试`);
+      site = target.fallback.site;
+      model = target.fallback.model;
+      openaiBody.model = target.fallback.model;
+      up = await 打开一次();
+    } else {
+      throw e;
+    }
+  }
+
+  // 钉死的站点上没有这个模型 → 同样降级重试
+  if (!up.ok && target.fallback && isModelNotFound(up.status, up.text)) {
+    warn(`[${site}] 没有模型 ${model}，自动降级到备用站点 ${target.fallback.site} 重试`);
+    site = target.fallback.site;
+    model = target.fallback.model;
+    openaiBody.model = target.fallback.model;
+    up = await 打开一次();
+  }
+  // 站点降级：上游网关故障（502/503/504）→ 换备用站点重试一次
+  if (!up.ok && target.fallback && site !== target.fallback.site && isGatewayError(up.status)) {
+    warn(`[${site}] 上游网关 ${up.status}，自动降级到备用站点 ${target.fallback.site} 重试`);
+    site = target.fallback.site;
+    model = target.fallback.model;
+    openaiBody.model = target.fallback.model;
+    up = await 打开一次();
   }
   if (!up.ok) {
     requestLog({ site, model, mode: wantsStream ? 'anthropic-stream' : 'anthropic-json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });

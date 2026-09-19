@@ -137,6 +137,12 @@ export function defaultConfig() {
     defaultSystemPrompt: 'You are a helpful AI assistant.',
     // 出站请求体里需要剔除的字段（一般留空）
     stripFields: [],
+    // 模型白名单 / 黑名单（支持 `*` 通配符；站点级也能配 allowModels / excludeModels）
+    // allowModels 非空时只保留命中的模型，excludeModels 命中即剔除。
+    allowModels: [],
+    excludeModels: [],
+    // 是否在 /v1/models 里额外暴露 `站点/模型` 变体（默认关闭：部分客户端不认带斜杠的 ID）
+    exposeSitePrefixed: false,
     // 站点表：国内版 / 国际版可分别启停，也可自行新增
     sites: structuredClone(SITE_PRESETS),
     // 模型 → 站点 的显式路由（可选），例如 { "claude-4.5": "intl-cli" }
@@ -146,6 +152,8 @@ export function defaultConfig() {
       idleMs: 300000, // 流中空闲超时
       metaMs: 30000, // 元数据接口（模型清单 / 额度查询）总时长超时
     },
+    // 上游「连接级」失败的重试策略（国际版 codebuddy.ai 实测约有 17% 的连接抖动）
+    upstreamRetry: { attempts: 3, backoffMs: [400, 1000] },
     models: DEFAULT_MODELS,
     modelAliases: {},
   };
@@ -272,6 +280,38 @@ export function validateConfig(cfg, defaults = defaultConfig()) {
     cfg.models = defaults.models;
   }
 
+  // ---- 模型白/黑名单与站点前缀暴露 ----
+  for (const field of ['allowModels', 'excludeModels']) {
+    if (!Array.isArray(cfg[field])) {
+      fix(`${field} 必须是数组，已回退为 []`);
+      cfg[field] = [];
+    } else if (cfg[field].some((v) => !isStr(v))) {
+      const kept = cfg[field].filter(isStr);
+      fix(`${field} 含非字符串项，已剔除 ${cfg[field].length - kept.length} 项`);
+      cfg[field] = kept;
+    }
+  }
+  if (cfg.exposeSitePrefixed !== undefined && !isBool(cfg.exposeSitePrefixed)) {
+    fix('exposeSitePrefixed 必须是布尔值，已回退为 false');
+    cfg.exposeSitePrefixed = Boolean(defaults.exposeSitePrefixed);
+  }
+
+  // ---- 上游连接级重试策略 ----
+  if (!isPlainObject(cfg.upstreamRetry)) {
+    fix('upstreamRetry 必须是对象，已回退为默认值');
+    cfg.upstreamRetry = structuredClone(defaults.upstreamRetry);
+  } else {
+    if (!Number.isInteger(cfg.upstreamRetry.attempts) || cfg.upstreamRetry.attempts <= 0) {
+      fix(`upstreamRetry.attempts 必须是正整数，已回退为 ${defaults.upstreamRetry.attempts}`);
+      cfg.upstreamRetry.attempts = defaults.upstreamRetry.attempts;
+    }
+    if (!Array.isArray(cfg.upstreamRetry.backoffMs)
+      || cfg.upstreamRetry.backoffMs.some((v) => !Number.isFinite(v) || v < 0)) {
+      fix('upstreamRetry.backoffMs 必须是非负数数组，已回退为默认值');
+      cfg.upstreamRetry.backoffMs = [...defaults.upstreamRetry.backoffMs];
+    }
+  }
+
   // ---- 超时（原先 timeouts:null 会让所有对话请求 500）----
   if (!isPlainObject(cfg.timeouts)) {
     fix('timeouts 必须是对象，已回退为默认值');
@@ -296,10 +336,24 @@ export function validateConfig(cfg, defaults = defaultConfig()) {
         delete cfg.sites[key];
         continue;
       }
-      for (const field of ['apiBase', 'billingBase', 'origin']) {
+      // apiBase / origin 是构造上游请求与请求头的必需项
+      for (const field of ['apiBase', 'origin']) {
         if (!isStr(site[field]) || !site[field].trim()) {
           fix(`sites.${key}.${field} 必须是非空字符串，已回退为默认值`);
           site[field] = defaults.sites[key]?.[field] ?? '';
+        }
+      }
+      // billingBase 可选：并非所有站点都使用 CodeBuddy 的计费接口，
+      // 预设里可能本就没有该字段，不能因为「缺失」就报问题；
+      // 仅在「给了但值不合法」时修正。
+      if (site.billingBase !== undefined && (!isStr(site.billingBase) || !site.billingBase.trim())) {
+        const fallback = defaults.sites[key]?.billingBase;
+        if (fallback) {
+          fix(`sites.${key}.billingBase 必须是非空字符串，已回退为默认值`);
+          site.billingBase = fallback;
+        } else {
+          fix(`sites.${key}.billingBase 必须是字符串，已移除该字段`);
+          delete site.billingBase;
         }
       }
       if (site.enabled !== undefined && !isBool(site.enabled)) {

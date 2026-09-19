@@ -1,7 +1,7 @@
 # workbuddy-openai-proxy
 
-把 **WorkBuddy / CodeBuddy 账号额度（国内版 + 国际版）** 包装成本机上的
-**OpenAI 兼容 + Anthropic 兼容** 接口，供 **TraeWork / TRAE / TraeCode CLI / Cherry Studio / Cursor** 等
+把 **WorkBuddy / CodeBuddy 账号额度（国内版 + 国际版）**
+包装成本机上的 **OpenAI 兼容 + Anthropic 兼容** 接口，供 **TraeWork / TRAE / TraeCode CLI / Cherry Studio / Cursor** 等
 任意 OpenAI 兼容客户端当作「自定义模型」接入。
 
 > Turn your WorkBuddy (Tencent CodeBuddy) account quota — **both the China and the international
@@ -15,7 +15,12 @@
 - 多站点：国内版（`copilot.tencent.com`）与国际版（`codebuddy.ai` / `workbuddy.ai`）协议同构，
   一套服务同时代理、按模型自动路由；两边额度互不通用，各自登录。
 - 能力：流式 / 非流式、完整工具调用（tool_calls 流式聚合、多轮回灌）、
-  `developer` 角色与 `tool_choice` 归一、accessToken 临期自动刷新、剩余积分与**积分倍率**查询。
+  `developer` 角色与 `tool_choice` 归一、accessToken 临期自动刷新、剩余积分与**积分倍率**查询、
+  模型白/黑名单过滤、上游连接级重试与站点自动降级。
+- 另含 **`/v1/responses`**（OpenAI Responses API 兼容层），供 Codex CLI / 桌面端接入，见 §8。
+
+> ℹ️ 本分支（`main`）只包含 CodeBuddy / WorkBuddy 相关能力。
+> **DeepSeek 官方站点**（`chat.deepseek.com`，协议不同）的实现在 `deepseek` 分支上。
 
 ---
 
@@ -358,6 +363,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 |---|---|---|
 | `/v1/models` | GET | 合并所有已登录站点的模型清单，含 `site` 与 `credits` 倍率（5 分钟缓存，失败回落配置） |
 | `/v1/chat/completions` | POST | OpenAI 兼容补全（流式/非流式、工具调用、developer 角色归一） |
+| `/v1/responses` | POST | OpenAI **Responses API** 兼容层（Codex CLI / 桌面端接入，双向协议转换） |
 | `/v1/messages` | POST | Anthropic Messages（流式事件完整：message_start → content_block_* → message_delta → message_stop） |
 | `/v1/messages/count_tokens` | POST | token 估算 |
 | `/status` | GET | 各站点登录状态 + 剩余积分（`?site=intl-cli` 可只看一个站点） |
@@ -377,6 +383,9 @@ node status.mjs --site intl-cli  # 只看某个站点
 - ✅ 工具调用：流式聚合 `tool_calls`、`tool_choice` 对象→字符串归一、`developer` 角色→`system`
 - ✅ 多轮工具回灌（agent 形态：assistant.tool_calls → tool 结果 → 最终回答）
 - ✅ 剩余积分查询、动态模型清单、积分倍率展示
+- ✅ 模型白/黑名单过滤（`*` 通配符，全局 + 站点级）
+- ✅ 上游连接级重试与站点自动降级（网关 5xx / 模型不存在时换站点重试）
+- ✅ OpenAI Responses API（`/v1/responses`）供 Codex CLI / 桌面端接入
 
 ---
 
@@ -388,7 +397,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 npm test              # 或：node --test --experimental-test-isolation=none "test/**/*.test.mjs"
 ```
 
-覆盖范围（275 个用例）：
+覆盖范围（298 个用例）：
 
 | 测试文件 | 覆盖内容 |
 |---|---|

@@ -205,16 +205,33 @@ describe('P0-1：DNS rebinding 防护（校验 Host）', () => {
 });
 
 describe('P0-2：API Key 鉴权', () => {
-  test('无 key 访问 /v1/* 返回 401', async (t) => {
+  // 说明：GET /v1/models 与 GET / 是「刻意免鉴权」的发现类接口
+  // （便于 CCSM / Codex 配置向导等客户端裸探基础地址做「同步模型」）。
+  // 它们只返回模型名与服务信息，不含任何密钥 / token，且服务仅监听本机。
+  test('GET /v1/models 刻意免鉴权，且响应不泄露密钥', async (t) => {
     if (skipIfBlocked(t)) return;
     const res = await raw(PORT, '/v1/models');
-    assert.equal(statusOf(res), 401);
+    assert.equal(statusOf(res), 200, '发现类接口放行');
+    assert.ok(!res.includes(API_KEY), '响应中绝不能出现完整密钥');
+  });
+
+  test('无 key 访问受保护接口返回 401', async (t) => {
+    if (skipIfBlocked(t)) return;
+    for (const [p, m] of [['/status', 'GET'], ['/v1/chat/completions', 'POST']]) {
+      const res = await raw(PORT, p, { method: m });
+      assert.equal(statusOf(res), 401, `${m} ${p} 无 key 应 401`);
+    }
   });
 
   test('错误 key 返回 401', async (t) => {
     if (skipIfBlocked(t)) return;
-    const res = await raw(PORT, '/v1/models', { headers: { Authorization: 'Bearer wrong-key' } });
-    assert.equal(statusOf(res), 401);
+    for (const p of ['/status', '/v1/chat/completions']) {
+      const res = await raw(PORT, p, {
+        method: p === '/status' ? 'GET' : 'POST',
+        headers: { Authorization: 'Bearer wrong-key' },
+      });
+      assert.equal(statusOf(res), 401, `${p} 错误 key 应 401`);
+    }
   });
 
   test('正确 key 放行', async (t) => {

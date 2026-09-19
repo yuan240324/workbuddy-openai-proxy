@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { siteKeys, saveConfig, paths, authPathFor } from './config.mjs';
 import { getAuth, isLoggedIn } from './auth.mjs';
 import { getCatalog, mergedModels, parseMultiplier } from './router.mjs';
-import { queryCredit, openChat, classifyFrame, upstreamErrorMessage } from './upstream.mjs';
+import { openChat, queryCredit, classifyFrame, upstreamErrorMessage, supportsCreditQuery } from './upstream.mjs';
 import { startLogin, pollLogin } from './device-login.mjs';
 import { usageSnapshot, resetUsage, flushUsage, recordBalance } from './usage.mjs';
 import { recentLogs } from './log.mjs';
@@ -78,7 +78,9 @@ export async function handleConsoleApi(ctx) {
     const sites = [];
     for (const s of siteKeys(cfg)) {
       const info = await siteSummary(cfg, s);
-      if (info.logged_in) {
+      // 没有配置 billingBase 的站点不走计费接口，
+      // 跳过查询而不是报错，前端会显示「—」。
+      if (info.logged_in && supportsCreditQuery(cfg, s)) {
         try {
           const credit = await queryCredit(cfg, s);
           info.credit = credit.remain;
@@ -209,6 +211,7 @@ export async function handleConsoleApi(ctx) {
     loginStates.set(site, r);
     return sendJson(res, 200, r);
   }
+
   if (p === '/login/poll' && method === 'GET') {
     const site = String(url.searchParams.get('site') || cfg.defaultSite);
     const st = loginStates.get(site);

@@ -36,13 +36,17 @@ describe('resolveTarget：显式站点前缀', () => {
     assert.equal(r.model, 'hy3');
   });
 
-  test('已禁用的站点前缀不被识别（避免路由到停用站点）', async () => {
-    const r = await resolveTarget(mkCfg(), 'disabled-site/hy3');
-    assert.notEqual(r.site, 'disabled-site');
-    assert.equal(r.model, 'disabled-site/hy3', '整体应作为模型名处理');
+  test('已禁用的站点前缀 → 明确报「站点已禁用」，不再当成模型名', async () => {
+    // 原先会静默把它整体当作模型名，最终在上游报出难懂的 "model not found"；
+    // 现在直接说明真实原因（站点存在但被 config.json 禁用）。
+    const err = await resolveTarget(mkCfg(), 'disabled-site/hy3').catch((e) => e);
+    assert.ok(err instanceof Error, '应抛错');
+    assert.equal(err.status, 404);
+    assert.match(err.message, /disabled-site/);
+    assert.match(err.message, /已禁用/);
   });
 
-  test('未知前缀整体作为模型名', async () => {
+  test('未知前缀整体作为模型名（与「已禁用」区分：模型 ID 本身可含斜杠）', async () => {
     const r = await resolveTarget(mkCfg(), 'unknown-site/hy3');
     assert.notEqual(r.site, 'unknown-site');
     assert.equal(r.model, 'unknown-site/hy3');
@@ -80,10 +84,12 @@ describe('resolveTarget：别名', () => {
     assert.equal(r.model, 'claude-sonnet-4.6');
   });
 
-  test('别名指向已禁用站点时不生效，落到默认站点', async () => {
+  test('别名指向已禁用站点 → 同样报「站点已禁用」', async () => {
     const cfg = mkCfg({ modelAliases: { x: 'disabled-site/foo' } });
-    const r = await resolveTarget(cfg, 'x');
-    assert.notEqual(r.site, 'disabled-site');
+    const err = await resolveTarget(cfg, 'x').catch((e) => e);
+    assert.ok(err instanceof Error, '应抛错');
+    assert.match(err.message, /已禁用/);
+    assert.match(err.message, /disabled-site/);
   });
 });
 

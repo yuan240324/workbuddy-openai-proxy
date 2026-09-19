@@ -10,13 +10,13 @@ import crypto from 'node:crypto';
 import { loadConfig, getLastConfigIssues, paths, siteKeys, ROOT } from './src/config.mjs';
 import { getAuth, isLoggedIn } from './src/auth.mjs';
 import { handleChatCompletions, handleModels } from './src/openai.mjs';
+import { handleResponses } from './src/responses.mjs';
 import { handleMessages, handleCountTokens } from './src/anthropic.mjs';
-import { queryCredit } from './src/upstream.mjs';
+import { queryCredit, supportsCreditQuery } from './src/upstream.mjs';
 import { handleConsoleApi } from './src/console-api.mjs';
 import { flushUsage } from './src/usage.mjs';
 import { readJsonBody, sendJson, sendError } from './src/util.mjs';
 import { log, warn, error } from './src/log.mjs';
-import { paths as cfgPaths } from './src/config.mjs';
 
 // 配置读不出来时要给出可读提示，而不是抛一串裸栈。
 // 尤其是 JSON 语法错误——用户手改 config.json 很容易漏个逗号。
@@ -30,7 +30,7 @@ try {
   error('读取 config.json 失败，服务无法启动：');
   error(`  ${e.message}`);
   if (e.code === 'INVALID_CONFIG_JSON') {
-    error(`  文件位置：${cfgPaths.config}`);
+    error(`  文件位置：${paths.config}`);
     error('  常见原因：手改时漏了逗号、多了逗号，或用了单引号（JSON 只认双引号）。');
     error('  可以用 node -e "JSON.parse(require(\'fs\').readFileSync(\'config.json\',\'utf8\'))" 检查语法。');
     error('  修好后重新启动；若想回到默认配置，可先备份再删除该文件。');
@@ -197,21 +197,35 @@ const server = http.createServer(async (req, res) => {
       return await handleConsoleApi({ cfg, req, res, url, body });
     }
 
-    if (!authorized(req)) {
-      warn(`未授权的请求被拒绝：${req.method} ${pathname} key=${clientKey(req).slice(0, 6)}…`);
-      return sendError(res, 401, 'API Key 不正确：请在请求头携带 Authorization: Bearer <config.json 里的 apiKey>', 'invalid_api_key');
+    // 只读「发现类」接口：放行免鉴权。
+    // 原因：不少客户端（如 CCSM / Codex 配置向导）会裸探基础地址与模型目录来做「同步模型」，
+    // 不带 Authorization。这里只返回模型名与服务信息，不含任何密钥 / token，
+    // 且服务只监听本机，因此免鉴权是安全的。
+    if (req.method === 'GET' && pathname.endsWith('/models')) {
+      res.setHeader('X-Service', 'workbuddy-proxy');
+      return await handleModels({ cfg, req, res });
     }
 
-    if (pathname === '/') {
+    if (req.method === 'GET' && (pathname === '/' || pathname === '/v1' || pathname === '/v1/')) {
+      res.setHeader('X-Service', 'workbuddy-proxy');
+      if (pathname !== '/') {
+        // 基础地址被当成模型目录请求时，直接给一份 OpenAI 风格的模型列表
+        return await handleModels({ cfg, req, res });
+      }
       return sendJson(res, 200, {
         service: 'workbuddy-proxy',
         console: `http://${cfg.host}:${cfg.port}/console`,
-        endpoints: ['/v1/models', '/v1/chat/completions', '/v1/messages', '/v1/messages/count_tokens', '/status', '/health', '/console'],
+        endpoints: ['/v1/models', '/v1/chat/completions', '/v1/responses', '/v1/messages', '/v1/messages/count_tokens', '/status', '/health', '/console'],
         sites: siteKeys(cfg),
         default_site: cfg.defaultSite,
         default_model: cfg.defaultModel,
         config: paths.config,
       });
+    }
+
+    if (!authorized(req)) {
+      warn(`未授权的请求被拒绝：${req.method} ${pathname} key=${clientKey(req).slice(0, 6)}…`);
+      return sendError(res, 401, 'API Key 不正确：请在请求头携带 Authorization: Bearer <config.json 里的 apiKey>', 'invalid_api_key');
     }
 
     // 各站点登录态 + 剩余积分（国际版计费口径不同，查询失败只返回错误信息）
@@ -222,7 +236,10 @@ const server = http.createServer(async (req, res) => {
       for (const site of keys) {
         const a = getAuth(site);
         let credit = null;
-        if (isLoggedIn(site)) {
+        // 没有配置 billingBase 的站点不走计费接口，
+        // 这里直接跳过，避免把「不适用」误报成查询失败。
+        const creditSupported = supportsCreditQuery(cfg, site);
+        if (isLoggedIn(site) && creditSupported) {
           try {
             credit = await queryCredit(cfg, site);
           } catch (e) {
@@ -239,6 +256,7 @@ const server = http.createServer(async (req, res) => {
           domain: a.domain || null,
           token_expires_at: a.expiresAt ? new Date(a.expiresAt).toISOString() : null,
           credit,
+          credit_supported: creditSupported,
         });
       }
       return sendJson(res, 200, { sites: out, default_site: cfg.defaultSite });
@@ -256,10 +274,12 @@ const server = http.createServer(async (req, res) => {
     // 这里按「路径中是否包含某段完整路径段」来判断，只要语义明确就命中对应处理器。
     //
     // 注意：用路径段（按 '/' 切分）匹配而不是裸 includes 子串，避免
-    //   - /v1/messages 误命中 includes('/messages') 之外的相似串
     //   - 任意含 "messages" 子串的路径（如 /v1/mymessagesfoo）被误判
+    //   - 仅后缀相似的路径（如 /v1/models2）被误判
     // 同时必须保留 TraeWork 那种「/v1/messages/chat/completions」的拼接容错，
-    // 因此判定顺序为：count_tokens → chat → messages（后者最宽，放最后）。
+    // 因此判定顺序为：responses → count_tokens → chat → messages（后者最宽，放最后）。
+    //
+    // 注：GET /v1/models 已在上面「免鉴权发现类接口」处提前处理，此处不再重复判断。
     const segs = pathname.split('/').filter(Boolean);
     const hasSeg = (...want) => {
       // 在 segments 里找连续匹配 want 的位置
@@ -276,12 +296,14 @@ const server = http.createServer(async (req, res) => {
       req.method === 'POST' && (hasSeg('count_tokens') || hasSeg('count-tokens'));
     const isChat = req.method === 'POST' && hasSeg('chat', 'completions');
     const isMessages = req.method === 'POST' && hasSeg('messages');
-    const isModels = req.method === 'GET' && segs[segs.length - 1] === 'models';
+    // Responses 协议（Codex 专用）：新增分支，不影响上面几条既有判断
+    const isResponses = req.method === 'POST' && hasSeg('responses');
 
     if (isChat || isMessages) log(`→ ${req.method} ${pathname}${clientKey(req) ? '' : '（无 Key）'}`);
 
-    if (isModels) {
-      return await handleModels({ cfg, req, res });
+    if (isResponses) {
+      const body = await readJsonBody(req);
+      return await handleResponses({ cfg, req, res, body, signal: ac.signal, pathname });
     }
 
     if (isCountTokens) {
@@ -303,7 +325,7 @@ const server = http.createServer(async (req, res) => {
     return sendError(
       res,
       404,
-      `未知路径 ${req.method} ${pathname}。可用：/v1/chat/completions（OpenAI 格式）、/v1/messages（Anthropic 格式）、/v1/models`,
+      `未知路径 ${req.method} ${pathname}。可用：/v1/chat/completions（OpenAI 格式）、/v1/responses（Codex 格式）、/v1/messages（Anthropic 格式）、/v1/models`,
       'not_found',
     );
   } catch (e) {

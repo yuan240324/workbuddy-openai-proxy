@@ -2,7 +2,7 @@
 // 多站点：请求里的 model 可写裸 ID（自动选站点），也可写 `站点/模型` 显式指定。
 import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
-import { resolveTarget, mergedModels, parseMultiplier } from './router.mjs';
+import { resolveTarget, mergedModels, parseMultiplier, isExcluded } from './router.mjs';
 import { recordUsage } from './usage.mjs';
 import { startSSE, writeSSE, sendJson, sendError, estimateTokens } from './util.mjs';
 import { requestLog, warn } from './log.mjs';
@@ -48,10 +48,36 @@ async function openWithRetry(cfg, site, body, signal) {
   return up;
 }
 
+/** 判断上游错误是否为「该站点没有这个模型」，据此触发站点降级。 */
+export function isModelNotFound(status, text) {
+  return status === 400 && /service info not found|model \[[^\]]+\] .*not found|no such model/i.test(String(text || ''));
+}
+
+/** 判断是否为「连接级失败」（网络抖动、连接被重置），同样触发站点降级。 */
+export function isTransportFailure(e) {
+  return e?.transport === true || e?.status === 504 || /ECONNRESET|UND_ERR_SOCKET|fetch failed|连接失败/i.test(String(e?.message || ''));
+}
+
+/**
+ * 判断是否为「上游网关故障」：openresty / APISIX 在回源失败时直接返回的 HTTP 502/503/504。
+ * 这类错误是「响应级」的——openChat 正常返回 { ok:false, status }，不抛异常，
+ * 因此走不到上面 isTransportFailure 的异常分支；但同样属于站点级故障，必须触发降级。
+ */
+export function isGatewayError(status) {
+  return status === 502 || status === 503 || status === 504;
+}
+
+/** 换个站点重试同一请求（用于降级）。 */
+async function openWithFallback(cfg, target, upstreamBody, signal, 原因) {
+  warn(`[${target.site}] ${原因}，自动降级到备用站点 ${target.fallback.site} 重试`);
+  upstreamBody.model = target.fallback.model;
+  return { up: await openWithRetry(cfg, target.fallback.site, upstreamBody, signal), site: target.fallback.site, model: target.fallback.model };
+}
+
 export async function handleChatCompletions(ctx) {
   const { cfg, res, body, signal } = ctx;
   const target = await resolveTarget(cfg, body.model);
-  const { site, model } = target;
+  let { site, model } = target;
   const publicModel = target.requested;
   const wantsStream = body.stream === true;
   const started = Date.now();
@@ -64,7 +90,37 @@ export async function handleChatCompletions(ctx) {
     upstreamBody.max_tokens = cfg.defaultMaxTokens;
   }
 
-  const up = await openWithRetry(cfg, site, upstreamBody, signal);
+  let up;
+  try {
+    up = await openWithRetry(cfg, site, upstreamBody, signal);
+  } catch (e) {
+    // 连接级失败（国际版网络抖动）→ 换站点重试一次
+    if (target.fallback && isTransportFailure(e) && !signal?.aborted) {
+      const r = await openWithFallback(cfg, target, upstreamBody, signal, `连接失败（${e?.cause?.code || e?.message}）`);
+      up = r.up;
+      site = r.site;
+      model = r.model;
+    } else {
+      throw e;
+    }
+  }
+
+  // 站点降级：路由表把模型钉到了某站点，但那个站点其实没有这个模型时，
+  // 自动换到真正拥有该模型的站点重试一次（配置里想强制走国际版，这里兜住例外情况）
+  if (!up.ok && target.fallback && isModelNotFound(up.status, up.text)) {
+    const r = await openWithFallback(cfg, target, upstreamBody, signal, `没有模型 ${model}`);
+    up = r.up;
+    site = r.site;
+    model = r.model;
+  }
+  // 站点降级：上游网关故障（openresty/APISIX 回源失败返回 502/503/504）→ 换备用站点重试一次。
+  // 加 site !== fallback 的判断，避免上一段降级后再次对同一站点重试。
+  if (!up.ok && target.fallback && site !== target.fallback.site && isGatewayError(up.status)) {
+    const r = await openWithFallback(cfg, target, upstreamBody, signal, `上游网关 ${up.status}`);
+    up = r.up;
+    site = r.site;
+    model = r.model;
+  }
   if (!up.ok) {
     requestLog({ site, model, mode: wantsStream ? 'stream' : 'json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });
     return sendError(res, up.status, upstreamErrorMessage(up.status, up.text, site));
@@ -218,8 +274,16 @@ export async function handleModels(ctx) {
   const data = [];
   const seen = new Set();
 
+  // 别名：先解析到真实模型，若目标已被白/黑名单剔除，就不要再列进目录
+  // （否则客户端会照目录逐个探测，必然失败）
   for (const [alias, targetModel] of Object.entries(cfg.modelAliases || {})) {
     if (seen.has(alias)) continue;
+    try {
+      const t = await resolveTarget(cfg, alias);
+      if (isExcluded(cfg, t.site, t.model)) continue;
+    } catch {
+      continue; // 解析不了（目标被剔除等）就不列出
+    }
     seen.add(alias);
     data.push({ id: alias, object: 'model', created: 1700000000, owned_by: 'workbuddy', name: `${alias} → ${targetModel}` });
   }
