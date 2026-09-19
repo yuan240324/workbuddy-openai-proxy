@@ -246,15 +246,64 @@ export async function aggregateFrames(frames) {
   return out;
 }
 
+/**
+ * 带超时的 fetch（用于非流式的元数据接口：模型列表 / 额度查询）。
+ *
+ * 为什么需要：这些接口原先既无 signal 也无超时，上游挂起时请求会永久悬挂，
+ * 导致 /v1/models、/status、控制台首屏全部卡死且连接不释放。
+ * 注意与 openChat 的区别：聊天接口是流式的，超时按「首字节/流中空闲」分别控制，
+ * 不能用单一总时长，因此这里只服务于一次性请求。
+ *
+ * 返回 { res, text, dispose }：超时定时器要覆盖到 body 读完为止（仅等响应头不够，
+ * 上游发完头再挂起同样会卡死），所以由调用方在读完 body 后调 dispose()。
+ */
+function fetchWithTimeout(url, { timeoutMs, ...init } = {}) {
+  const ac = new AbortController();
+  const ms = Math.max(1, Number(timeoutMs) || 0);
+  const timer = setTimeout(() => ac.abort(new Error(`request timeout after ${ms}ms`)), ms);
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    clearTimeout(timer);
+  };
+  const p = fetch(url, { ...init, signal: ac.signal }).then(
+    (res) => ({
+      res,
+      text: async () => {
+        try {
+          return await res.text();
+        } finally {
+          dispose();
+        }
+      },
+      dispose,
+    }),
+    (e) => {
+      dispose();
+      throw e;
+    },
+  );
+  return p;
+}
+
 /** 拉取站点可用模型清单（含积分倍率）。 */
 export async function fetchModels(cfg, site) {
   const siteCfg = cfg.sites[site];
   const auth = getAuth(site);
   await ensureToken(cfg, site);
-  const res = await fetch(siteCfg.apiBase + '/console/enterprises/personal/models', {
-    headers: { ...chatHeaders(siteCfg, auth), Accept: 'application/json' },
-  });
-  const text = await res.text();
+  const timeoutMs = cfg.timeouts?.metaMs ?? 30000;
+  let res, text;
+  try {
+    const r = await fetchWithTimeout(siteCfg.apiBase + '/console/enterprises/personal/models', {
+      timeoutMs,
+      headers: { ...chatHeaders(siteCfg, auth), Accept: 'application/json' },
+    });
+    res = r.res;
+    text = await r.text();
+  } catch (e) {
+    throw new UpstreamError(`[${site}] 模型接口请求失败（${Math.round(timeoutMs / 1000)}s 超时或网络异常）：${e?.message || e}`, { status: 504, transport: true, site });
+  }
   if (res.status !== 200) throw new UpstreamError(`[${site}] 模型接口 HTTP ${res.status}：${text.slice(0, 200)}`, { status: res.status, site });
   let json;
   try {
@@ -297,12 +346,20 @@ export async function queryCredit(cfg, site) {
     PackageEndTimeRangeBegin: fmt(now),
     PackageEndTimeRangeEnd: fmt(end),
   };
-  const res = await fetch(siteCfg.billingBase + '/v2/billing/meter/get-user-resource', {
-    method: 'POST',
-    headers: billingHeaders(siteCfg, auth),
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
+  const timeoutMs = cfg.timeouts?.metaMs ?? 30000;
+  let res, text;
+  try {
+    const r = await fetchWithTimeout(siteCfg.billingBase + '/v2/billing/meter/get-user-resource', {
+      timeoutMs,
+      method: 'POST',
+      headers: billingHeaders(siteCfg, auth),
+      body: JSON.stringify(body),
+    });
+    res = r.res;
+    text = await r.text();
+  } catch (e) {
+    throw new UpstreamError(`[${site}] 额度接口请求失败（${Math.round(timeoutMs / 1000)}s 超时或网络异常）：${e?.message || e}`, { status: 504, transport: true, site });
+  }
   let json;
   try {
     json = JSON.parse(text);

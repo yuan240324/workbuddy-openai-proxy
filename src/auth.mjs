@@ -13,8 +13,11 @@ export class AuthError extends Error {
   }
 }
 
-const stores = new Map(); // site → { auth, mtime }
+// site → { auth, mtime, path }；用「站点 + 文件路径」做键，
+// 这样配置目录切换后（测试隔离）不会命中另一个目录的缓存。
+const stores = new Map();
 const refreshInFlight = new Map(); // site → Promise
+const storeKey = (site, file) => `${site}\u0000${file}`;
 
 /** 读取一个站点的凭证（按 mtime 缓存，登录脚本运行中写入也能被自动感知）。 */
 export function loadAuth(site = 'cn-cli') {
@@ -34,7 +37,8 @@ export function loadAuth(site = 'cn-cli') {
       }
     }
   }
-  const cached = stores.get(site);
+  const key = storeKey(site, useFile);
+  const cached = stores.get(key);
   if (cached && mtime !== 0 && cached.mtime === mtime) return cached.auth;
 
   let auth = {};
@@ -47,7 +51,7 @@ export function loadAuth(site = 'cn-cli') {
     }
   }
   hydrateFromToken(site, auth);
-  stores.set(site, { auth, mtime });
+  stores.set(key, { auth, mtime, path: useFile });
   return auth;
 }
 
@@ -58,7 +62,7 @@ export function getAuth(site = 'cn-cli') {
 export function saveAuth(site, next) {
   const file = authPathFor(site);
   fs.writeFileSync(file, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-  stores.set(site, { auth: next, mtime: fs.statSync(file).mtimeMs });
+  stores.set(storeKey(site, file), { auth: next, mtime: fs.statSync(file).mtimeMs, path: file });
   return next;
 }
 
@@ -104,6 +108,44 @@ function tokenExpiringWithin(site, minMs) {
   return false; // 无法判断有效期时先直接用，401 再触发刷新
 }
 
+/**
+ * 判断刷新失败是否属于「凭证已彻底失效」（需要重新登录），
+ * 而不是网络抖动/上游临时故障（保留凭证下次再试）。
+ */
+function isCredentialDead(res, json) {
+  // 明确的 HTTP 鉴权失败
+  if (res.status === 401 || res.status === 403) return true;
+  // OAuth 语义的失效错误码
+  const code = String(json?.code ?? '');
+  const msg = String(json?.msg || json?.error?.code || json?.error || '');
+  if (/invalid_grant|invalid_token|expired_token|unauthorized/i.test(msg)) return true;
+  // 上游常见的「登录态失效」业务码
+  if (code && /^(401|403|1001|1002|1003|1004)$/.test(code)) return true;
+  return false;
+}
+
+/** 清除某站点的登录凭证（凭证已失效时调用，避免反复用死 token 重试）。 */
+function clearAuth(site) {
+  const file = authPathFor(site);
+  try {
+    fs.rmSync(file, { force: true });
+  } catch (e) {
+    warn(`[${site}] 清除失效凭证失败：`, e.message);
+  }
+  // 旧版单站点凭证也一并清掉（仅 cn-cli 会回落到它）
+  if (site === 'cn-cli') {
+    try {
+      fs.rmSync(paths.legacyAuth, { force: true });
+    } catch {
+      /* 忽略 */
+    }
+  }
+  // 清掉该站点在当前目录下的缓存（含旧文件来源的键），避免读到死凭证
+  stores.delete(storeKey(site, file));
+  stores.delete(storeKey(site, paths.legacyAuth));
+  stores.set(storeKey(site, file), { auth: {}, mtime: 0, path: file });
+}
+
 /** 调用站点刷新接口换新 token。 */
 export async function refreshToken(cfg, site) {
   const a = getAuth(site);
@@ -128,10 +170,19 @@ export async function refreshToken(cfg, site) {
       throw new AuthError(`[${site}] 刷新响应无法解析（HTTP ${res.status}）：${text.slice(0, 200)}`, 'refresh_failed');
     }
     if (res.status >= 400 || json.code !== 0 || !json.data?.accessToken) {
-      throw new AuthError(
+      const err = new AuthError(
         `[${site}] 刷新 token 失败（HTTP ${res.status} code=${json.code}）：${String(json.msg || text).slice(0, 200)}`,
         'refresh_failed',
       );
+      // 凭证已彻底失效时清掉本地凭证，避免后续每次都拿死 token 重试刷屏
+      if (isCredentialDead(res, json)) {
+        clearAuth(site);
+        err.code = 'not_logged_in';
+        err.status = 401;
+        err.message = `[${site}] 登录态已失效（HTTP ${res.status} code=${json.code}）：请重新登录 —— node login.mjs --site ${site}`;
+        warn(err.message);
+      }
+      throw err;
     }
     a.accessToken = json.data.accessToken;
     if (json.data.refreshToken) a.refreshToken = json.data.refreshToken;

@@ -1,0 +1,16 @@
+{
+  "name": "workbuddy-openai-proxy",
+  "version": "1.1.0",
+  "private": true,
+  "description": "把 WorkBuddy / CodeBuddy 账号额度包装成本机 OpenAI + Anthropic 兼容接口（零依赖，仅本机监听）",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test --test-reporter=spec --experimental-test-isolation=none \"test/**/*.test.mjs\"",
+    "test:watch": "node --test --test-reporter=spec --experimental-test-isolation=none --watch \"test/**/*.test.mjs\""
+  }
+}

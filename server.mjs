@@ -7,7 +7,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { loadConfig, paths, siteKeys, ROOT } from './src/config.mjs';
+import { loadConfig, getLastConfigIssues, paths, siteKeys, ROOT } from './src/config.mjs';
 import { getAuth, isLoggedIn } from './src/auth.mjs';
 import { handleChatCompletions, handleModels } from './src/openai.mjs';
 import { handleMessages, handleCountTokens } from './src/anthropic.mjs';
@@ -16,8 +16,27 @@ import { handleConsoleApi } from './src/console-api.mjs';
 import { flushUsage } from './src/usage.mjs';
 import { readJsonBody, sendJson, sendError } from './src/util.mjs';
 import { log, warn, error } from './src/log.mjs';
+import { paths as cfgPaths } from './src/config.mjs';
 
-const cfg = loadConfig();
+// 配置读不出来时要给出可读提示，而不是抛一串裸栈。
+// 尤其是 JSON 语法错误——用户手改 config.json 很容易漏个逗号。
+let cfg;
+let configIssues = [];
+try {
+  cfg = loadConfig();
+  // loadConfig 内部已完成校验与降级，并记录了发现的问题（getLastConfigIssues）
+  configIssues = getLastConfigIssues();
+} catch (e) {
+  error('读取 config.json 失败，服务无法启动：');
+  error(`  ${e.message}`);
+  if (e.code === 'INVALID_CONFIG_JSON') {
+    error(`  文件位置：${cfgPaths.config}`);
+    error('  常见原因：手改时漏了逗号、多了逗号，或用了单引号（JSON 只认双引号）。');
+    error('  可以用 node -e "JSON.parse(require(\'fs\').readFileSync(\'config.json\',\'utf8\'))" 检查语法。');
+    error('  修好后重新启动；若想回到默认配置，可先备份再删除该文件。');
+  }
+  process.exit(1);
+}
 
 // 控制台会话 token：每次启动随机生成，注入到控制台页面里；避免把 apiKey 暴露在浏览器中
 const CONSOLE_TOKEN = crypto.randomBytes(16).toString('hex');
@@ -26,6 +45,54 @@ const CONSOLE_DIR = path.join(ROOT, 'console');
 function consoleAuthorized(req) {
   if ((req.headers['x-console-token'] || '') === CONSOLE_TOKEN) return true;
   return authorized(req); // 也允许直接用 apiKey 调控制台接口（方便脚本）
+}
+
+/**
+ * 本机来源校验（用于 /console 页面与控制台接口）。
+ *
+ * 为什么需要：服务虽只监听 127.0.0.1，但本机服务对「用户浏览器里打开的任意网页」同样可达。
+ * 跨站页面发起 fetch('http://127.0.0.1:8788/console') 时，源是恶意页面、目标是本机，
+ * 若响应带 ACAO:* 且页面无需鉴权，对方就能读走内联在 HTML 里的会话 token，
+ * 进而调用控制台接口（切模型 / 删凭证 / 停服）。因此这里必须校验来源。
+ *
+ * 判定规则：
+ *   - 无 Origin（curl / ask.mjs / stop.mjs 等本机工具，以及同源导航）→ 放行
+ *   - Origin 的 host 属于本机回环地址（localhost / 127.x / [::1]）→ 放行
+ *   - 其他一律拒绝
+ * 同时校验 Host 头，抵御 DNS rebinding（恶意域名重绑定到 127.0.0.1 时 Host 仍是外部域名）。
+ */
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+function isLoopbackHostname(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (LOOPBACK_HOSTNAMES.has(h)) return true;
+  // 127.0.0.0/8 整个网段都视作本机
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/** 请求的 Host 是否指向本机（挡 DNS rebinding）。 */
+function hostIsLocal(req) {
+  const host = req.headers.host || '';
+  if (!host) return true; // HTTP/1.0 等无 Host 的场景，交由 Origin 判定
+  try {
+    const { hostname } = new URL(`http://${host}`);
+    return isLoopbackHostname(hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** 控制台来源是否可信。 */
+function consoleOriginAllowed(req) {
+  if (!hostIsLocal(req)) return false;
+  const origin = req.headers.origin;
+  if (!origin) return true; // 同源导航 / 本机工具：不带 Origin
+  try {
+    const { hostname } = new URL(origin);
+    return isLoopbackHostname(hostname);
+  } catch {
+    return false;
+  }
 }
 
 /** 汇总各站点登录状态。 */
@@ -51,8 +118,11 @@ function clientKey(req) {
 }
 
 function authorized(req) {
-  if (!cfg.apiKey) return true; // 未配置密钥则不校验（仅建议本机场景）
-  return clientKey(req) === cfg.apiKey;
+  // 注意：apiKey 为空串时也必须视为「未配置密钥」而不是「放行」。
+  // 原本的 !cfg.apiKey 会让被误清空的配置变成完全无鉴权，这里显式判定。
+  const key = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : '';
+  if (!key) return true; // 未配置密钥则不校验（仅建议本机场景）
+  return clientKey(req) === key;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -60,9 +130,31 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  const isConsolePath = pathname === '/console' || pathname === '/console/' || pathname.startsWith('/console/api/');
+
+  // 控制台相关路径：绝不设置 ACAO:*，否则任意网页都能跨域读走页面内的会话 token
+  // （页面无需鉴权即可访问，token 明文中内联在 HTML 里）。同时禁止被 iframe 嵌入。
+  if (isConsolePath) {
+    res.setHeader('Vary', 'Origin');
+    if (consoleOriginAllowed(req)) {
+      const origin = req.headers.origin;
+      if (origin) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Console-Token, Authorization, X-Api-Key');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+      }
+    } else {
+      warn(`拒绝来自非本机来源的控制台请求：${req.method} ${pathname} origin=${req.headers.origin || '-'} host=${req.headers.host || '-'}`);
+      return sendError(res, 403, '控制台仅允许本机访问', 'console_forbidden');
+    }
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  } else {
+    // 对话接口需要跨域（浏览器内的客户端），保持原有宽松策略
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  }
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
@@ -161,12 +253,30 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 路径容错：不同客户端拼接方式不同（如 TraeWork 会拼成 /v1/messages/chat/completions），
-    // 这里按“路径里是否包含某段”来判断，只要语义明确就命中对应处理器。
-    const seg = (s) => pathname.includes(s);
-    const isCountTokens = req.method === 'POST' && (seg('/count_tokens') || seg('/count-tokens'));
-    const isChat = req.method === 'POST' && seg('/chat/completions');
-    const isMessages = req.method === 'POST' && seg('/messages');
-    const isModels = req.method === 'GET' && pathname.endsWith('/models');
+    // 这里按「路径中是否包含某段完整路径段」来判断，只要语义明确就命中对应处理器。
+    //
+    // 注意：用路径段（按 '/' 切分）匹配而不是裸 includes 子串，避免
+    //   - /v1/messages 误命中 includes('/messages') 之外的相似串
+    //   - 任意含 "messages" 子串的路径（如 /v1/mymessagesfoo）被误判
+    // 同时必须保留 TraeWork 那种「/v1/messages/chat/completions」的拼接容错，
+    // 因此判定顺序为：count_tokens → chat → messages（后者最宽，放最后）。
+    const segs = pathname.split('/').filter(Boolean);
+    const hasSeg = (...want) => {
+      // 在 segments 里找连续匹配 want 的位置
+      for (let i = 0; i + want.length <= segs.length; i++) {
+        let ok = true;
+        for (let j = 0; j < want.length; j++) {
+          if (segs[i + j] !== want[j]) { ok = false; break; }
+        }
+        if (ok) return true;
+      }
+      return false;
+    };
+    const isCountTokens =
+      req.method === 'POST' && (hasSeg('count_tokens') || hasSeg('count-tokens'));
+    const isChat = req.method === 'POST' && hasSeg('chat', 'completions');
+    const isMessages = req.method === 'POST' && hasSeg('messages');
+    const isModels = req.method === 'GET' && segs[segs.length - 1] === 'models';
 
     if (isChat || isMessages) log(`→ ${req.method} ${pathname}${clientKey(req) ? '' : '（无 Key）'}`);
 
@@ -212,12 +322,41 @@ const server = http.createServer(async (req, res) => {
 server.keepAliveTimeout = 120000;
 server.requestTimeout = 0; // 流式长连接不设总时长上限
 
+/** 把配置校验问题打出来（启动成功与否都要能看到）。 */
+function reportConfigIssues() {
+  if (!configIssues.length) return;
+  warn(`config.json 有 ${configIssues.length} 处问题已自动回退（原值可能被忽略）：`);
+  for (const msg of configIssues) warn(`  · ${msg}`);
+}
+
+// 端口被占用等情况要给出可操作的提示，而不是抛一串裸栈
+server.on('error', (e) => {
+  error(`服务启动失败：${e.code || e.message}`);
+  if (e.code === 'EADDRINUSE') {
+    error(`  端口 ${cfg.port} 已被占用。可能已经有一个实例在运行：`);
+    error('    · 查看状态：node status.mjs');
+    error('    · 停止旧实例：node stop.mjs   或双击 stop.cmd');
+    error(`    · 或改 config.json 里的 port 换一个端口`);
+  } else if (e.code === 'EACCES') {
+    error(`  没有权限监听 ${cfg.host}:${cfg.port}（1024 以下端口通常需要管理员权限）`);
+  }
+  reportConfigIssues();
+  process.exit(1);
+});
+
 server.listen(cfg.port, cfg.host, () => {
   log('WorkBuddy 反代已启动（国内版 + 国际版多站点）');
   log(`  控制台：http://${cfg.host}:${cfg.port}/console   ← 建议用桌面快捷方式打开`);
   log(`  监听地址：http://${cfg.host}:${cfg.port}   （仅本机可达）`);
-  log(`  API Key：${cfg.apiKey}`);
+  const keyLen = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim().length : 0;
+  if (!keyLen) {
+    warn('  config.json 未配置 apiKey，服务当前不做鉴权（任何本机程序均可调用）。建议补一个随机密钥。');
+  } else {
+    // 不打印完整密钥，避免被日志文件/控制台历史泄露
+    log(`  API Key：${cfg.apiKey.slice(0, 6)}…${cfg.apiKey.slice(-4)}（完整值见 config.json）`);
+  }
   log(`  默认站点/模型：${cfg.defaultSite} / ${cfg.defaultModel}    配置文件：${paths.config}`);
+  reportConfigIssues();
   for (const s of siteState(cfg)) {
     log(`  站点 ${s.site.padEnd(9)} ${s.logged_in ? `已登录 uid=${s.uid}` : '未登录'}   ${s.apiBase}`);
   }

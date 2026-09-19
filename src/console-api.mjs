@@ -1,6 +1,7 @@
 // 控制台后端 API：状态总览 / 模型清单 / 一键切换默认模型 / 日志 / 用量 / 探测 / 登录 / 停服
 // 仅本机可用（服务只监听 127.0.0.1），鉴权用控制台会话 token 或 config.json 的 apiKey。
-import { siteKeys, saveConfig } from './config.mjs';
+import fs from 'node:fs';
+import { siteKeys, saveConfig, paths, authPathFor } from './config.mjs';
 import { getAuth, isLoggedIn } from './auth.mjs';
 import { getCatalog, mergedModels, parseMultiplier } from './router.mjs';
 import { queryCredit, openChat, classifyFrame, upstreamErrorMessage } from './upstream.mjs';
@@ -224,11 +225,9 @@ export async function handleConsoleApi(ctx) {
     const site = String(body.site || '');
     if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
     // 只清空本项目内的凭证文件，不动客户端
-    const { authPathFor } = await import('./config.mjs');
-    const fs = await import('node:fs');
     try {
       fs.rmSync(authPathFor(site), { force: true });
-      if (site === 'cn-cli') fs.rmSync((await import('./config.mjs')).paths.legacyAuth, { force: true });
+      if (site === 'cn-cli') fs.rmSync(paths.legacyAuth, { force: true });
     } catch (e) {
       return sendJson(res, 500, { error: e.message });
     }

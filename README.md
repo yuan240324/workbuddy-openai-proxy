@@ -35,11 +35,14 @@ workbuddy-openai-proxy/
 ├── start-hidden.vbs      # 完全隐藏启动（桌面「启动反代」快捷方式用）
 ├── stop.cmd / status.cmd / login.cmd / login-intl.cmd / ask.cmd
 ├── config.example.json   # 配置样例（复制为 config.json 后按需修改）
+├── package.json          # 仅用于 npm test（无任何运行时依赖）
 ├── LICENSE               # MIT
+├── test/                 # 测试（node:test，零依赖，见「测试」一节）
+│   └── *.test.mjs
 ├── console/
-│   └── index.html        # 控制台界面（单文件、零依赖、中文界面）
+│   └── index.html        # 控制台界面（单文件、零依赖、中文界面、深/浅双主题）
 └── src/
-    ├── config.mjs        # 配置加载 + 站点表（国内版 / 国际版）
+    ├── config.mjs        # 配置加载 + 校验降级 + 站点表（国内版 / 国际版）
     ├── auth.mjs          # 多站点凭证存取 + 自动刷新（单飞）+ 运行中热加载
     ├── device-login.mjs  # 设备授权登录（CLI 与控制台共用）
     ├── headers.mjs       # 站点感知的上游请求头
@@ -309,7 +312,15 @@ node status.mjs --site intl-cli  # 只看某个站点
 | 模型回答被截断 | 上游「思考」也计入输出 token；在 TraeWork 高级配置里调大输出上下文窗口 |
 | TraeWork 里模型列表为空 | TraeWork 不拉 `/v1/models`，模型 ID 手填即可 |
 | 想换端口 / 换 Key | 改 `config.json` 后重启服务 |
-| 想关掉鉴权 | 把 `config.json` 的 `apiKey` 设为 `""`（仅本机使用时才可以） |
+| 想关掉鉴权 | 把 `config.json` 的 `apiKey` 设为 `""`（仅本机使用时才可以；启动时会打印 WARN 提醒） |
+| 启动报 `端口 xxx 已被占用` | 已有一个实例在跑：`node status.mjs` 查看，`node stop.mjs` 停止；或改 `config.json` 的 `port` |
+| 启动报 `config.json 不是合法 JSON` | 手改配置时漏了/多了逗号，或用了单引号（JSON 只认双引号）。修好后重启；服务不会覆盖你的文件 |
+| 启动提示「有 N 处问题已自动回退」 | 这些字段类型不对，已自动改用默认值。按提示逐条修正 `config.json` 即可 |
+| `/v1/models` 或控制台首屏转圈很久 | 上游元数据接口较慢。超过 `timeouts.metaMs`（默认 30s）会自动放弃并回落缓存，可适当调小 |
+
+> **配置容错**：`config.json` 里的 `port` / `timeouts` / `sites` / `stripFields` 等字段若写错类型，
+> 服务会**自动回退到安全默认值并在启动日志里逐条列出**，而不会崩溃或静默忽略。
+> 详见 `src/config.mjs` 的 `validateConfig()`。
 
 ---
 
@@ -369,16 +380,62 @@ node status.mjs --site intl-cli  # 只看某个站点
 
 ---
 
-## 10. 安全与合规
+## 10. 测试
+
+零依赖，用 Node 内置的 `node:test`，**不需要 npm install**（Node ≥ 18）。
+
+```bash
+npm test              # 或：node --test --experimental-test-isolation=none "test/**/*.test.mjs"
+```
+
+覆盖范围（275 个用例）：
+
+| 测试文件 | 覆盖内容 |
+|---|---|
+| `config.test.mjs` | 配置校验：坏值降级、合法配置零改动 |
+| `config-load.test.mjs` | 配置加载链路、非法 JSON 处理、旧版配置迁移 |
+| `upstream.test.mjs` | 请求体改写、`tool_choice` 归一、SSE 聚合、错误信封识别 |
+| `anthropic.test.mjs` | Anthropic ↔ OpenAI 双向转换、tool_result 顺序约束 |
+| `router.test.mjs` / `router.resolve.test.mjs` | 倍率解析、模型→站点路由优先级 |
+| `auth.test.mjs` | 凭证刷新、失效清除与临时故障的区分、JWT 解析、并发单飞 |
+| `timeout.test.mjs` | 上游挂起时必须超时返回（含响应体阶段） |
+| `paths.test.mjs` | 路径段匹配与 TraeWork 拼接容错 |
+| `usage.test.mjs` | 用量统计、余额采样节流 |
+| `util.test.mjs` | token 估算、请求体解析与大小上限 |
+| `security.test.mjs` | 端到端安全：控制台来源校验、DNS rebinding、鉴权 |
+
+**测试隔离**：测试通过 `setConfigDir()` / `loadConfig(dir)` 把配置目录指向临时目录，
+不会读写仓库里的 `config.json`、`auth.*.json`、`usage.json`。
+
+> 若你的环境不允许 `--experimental-test-isolation=none`（该参数让测试在单进程内运行），
+> 去掉它即可——每个测试文件也会在独立进程里跑，同样通过。
+
+---
+
+## 11. 安全与合规
 
 - 仅监听 `127.0.0.1`；`auth.<站点>.json` 权限 0600，**不要外传**、不要提交仓库（`.gitignore` 已忽略）。
 - 走的是 **CodeBuddy 官方 CLI 所用的非公开接口**，无官方文档、可能随时变更；本项目只做本机自用转发。
 - 请仅用于**本人账号**，遵守腾讯 CodeBuddy / WorkBuddy 用户协议；额度规则与风控由上游决定。
 - 本项目与腾讯无任何关联，未获官方授权或认可，请自行评估使用风险。
 
+**本机服务的访问控制**（重要）：
+
+「只监听 127.0.0.1」并不等于安全——你浏览器里打开的**任意网页**同样能访问本机服务。
+为此本项目对控制台做了来源校验：
+
+- `/console` 页面与控制台接口**只接受本机来源**（`Origin` 为空或为回环地址），
+  并校验 `Host` 以防 DNS rebinding；同时返回 `X-Frame-Options: DENY`。
+- 控制台相关响应**不会**返回 `Access-Control-Allow-Origin: *`，
+  避免跨站页面读取页面内注入的会话 token。
+- `/v1/*` 对话接口保留宽松 CORS（浏览器内的客户端需要），但它始终受 `apiKey` 鉴权保护。
+
+若 `config.json` 的 `apiKey` 为空，服务会**启动时打印 WARN** 提示当前不做鉴权。
+建议始终保留一个随机密钥。
+
 ---
 
-## 11. 致谢
+## 12. 致谢
 
 上游协议细节参考了以下开源项目的公开实现（本项目代码为独立重写，仅借鉴接口形态与字段约定）：
 
@@ -393,7 +450,7 @@ Trae / TraeWork / CodeBuddy / WorkBuddy 均为其各自所有者的商标，本�
 
 ---
 
-## 12. 许可证
+## 13. 许可证
 
 [MIT](LICENSE)
 
