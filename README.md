@@ -1,5 +1,7 @@
 # workbuddy-openai-proxy
 
+[English](README.en.md) · **中文**
+
 把 **WorkBuddy / CodeBuddy 账号额度（国内版 + 国际版）**
 包装成本机上的 **OpenAI 兼容 + Anthropic 兼容** 接口，供 **TraeWork / TRAE / TraeCode CLI / Cherry Studio / Cursor** 等
 任意 OpenAI 兼容客户端当作「自定义模型」接入。
