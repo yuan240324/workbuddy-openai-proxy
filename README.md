@@ -8,17 +8,131 @@
 > edition** — into a local, OpenAI- and Anthropic-compatible HTTP endpoint.
 > Zero dependencies, pure Node.js, loopback-only.
 
-- 依赖：仅需 **Node.js ≥ 18**，**零第三方依赖**，不用 npm install、不用 Docker。
-- 隔离：配置 / 凭证 / 日志全部落在**项目目录内**；登录走官方**设备授权（OAuth）**，
+![Node](https://img.shields.io/badge/Node.js-%E2%89%A5%2018-3c873a?logo=node.js&logoColor=white)
+![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
+![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen)
+![Platform](https://img.shields.io/badge/tested%20on-Windows%20%C2%B7%20Node%2024-blue)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
+> 跨平台说明见下方「三平台差异」。核心逻辑只用 Node 内置模块、无原生依赖，
+> 理论上 Windows / macOS / Linux 都能跑；但**目前只在 Windows + Node 24 上实测过**，
+> 其他平台欢迎反馈（见 §12 的已知边界）。
+
+<!-- 演示 GIF 放这里：docs/demo.gif（< 2MB），见「如何录制演示」 -->
+
+---
+
+## 30 秒上手（不用装任何东西）
+
+**只需要 Node.js ≥ 18。** 没有 `npm install`，没有 `node_modules`，没有 Docker，
+没有全局 CLI，没有配置文件要抄。
+
+```bash
+git clone https://github.com/yuan240324/workbuddy-openai-proxy.git
+cd workbuddy-openai-proxy
+node server.mjs
+```
+
+然后浏览器打开 <http://127.0.0.1:8788/console>，点一下「登录」授权，就能用了。
+
+> **为什么强调这个**：这类工具大多要先跑 `npm install` 拉几百个包、或架 Docker。
+> 本项目 `dependencies` 和 `devDependencies` **都是空的** —— 全部 4100 行源码只依赖 Node 内置模块。
+> 你可以直接读源码确认，没有供应链风险。
+
+### 三平台差异
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| **启动** | `node server.mjs`<br>或双击 `start.cmd` | `node server.mjs` | `node server.mjs` |
+| **后台常驻** | 双击 `start-hidden.vbs`（完全隐藏） | `nohup node server.mjs >server.log 2>&1 &` | `nohup node server.mjs >server.log 2>&1 &` |
+| **停止** | `stop.cmd`（或关掉窗口） | `node stop.mjs` | `node stop.mjs` |
+| **打开控制台** | 桌面快捷方式 / `console-open.vbs` | 浏览器手动开 <http://127.0.0.1:8788/console> | 同 macOS |
+| **开机自启** | 启动文件夹放 `start-hidden.vbs` 快捷方式 | 见下方 launchd | 见下方 systemd |
+| **登录授权** | 自动弹出默认浏览器 | 自动弹出默认浏览器 | 自动弹出；无桌面环境用 `--no-open` |
+
+<details>
+<summary>macOS 开机自启（launchd）</summary>
+
+存为 `~/Library/LaunchAgents/com.local.workbuddy-proxy.plist`（路径按实际改）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.local.workbuddy-proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/你/反代/server.mjs</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/你/反代</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.local.workbuddy-proxy.plist
+```
+
+</details>
+
+<details>
+<summary>Linux 开机自启（systemd --user）</summary>
+
+存为 `~/.config/systemd/user/workbuddy-proxy.service`：
+
+```ini
+[Unit]
+Description=WorkBuddy OpenAI Proxy
+After=network.target
+
+[Service]
+WorkingDirectory=%h/反代
+ExecStart=/usr/bin/node %h/反代/server.mjs
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now workbuddy-proxy
+loginctl enable-linger $USER      # 未登录也保持运行
+```
+
+</details>
+
+<details>
+<summary>无桌面环境（SSH / 服务器）怎么登录</summary>
+
+登录是浏览器授权的设备码流程，无头机器上这样走：
+
+```bash
+node login.mjs --site cn-cli --no-open
+# 终端会打印一条授权链接 → 复制到你自己电脑的浏览器打开并授权
+# 授权完成后脚本会自动轮询到结果，凭证落盘
+```
+
+</details>
+
+---
+
+## 特性
+
+- **零依赖**：仅需 **Node.js ≥ 18**，不用 npm install、不用 Docker。
+- **隔离**：配置 / 凭证 / 日志全部落在**项目目录内**；登录走官方**设备授权（OAuth）**，
   不读取 WorkBuddy 客户端的本地配置、浏览器数据或任何项目目录以外的文件。
-- 监听：默认只绑 `127.0.0.1:8788`，不对局域网/公网暴露，带本地 API Key 鉴权。
-- 多站点：国内版（`copilot.tencent.com`）与国际版（`codebuddy.ai` / `workbuddy.ai`）协议同构，
+- **监听**：默认只绑 `127.0.0.1:8788`，不对局域网/公网暴露，带本地 API Key 鉴权。
+- **多站点**：国内版（`copilot.tencent.com`）与国际版（`codebuddy.ai` / `workbuddy.ai`）协议同构，
   一套服务同时代理、按模型自动路由；两边额度互不通用，各自登录。
-- 能力：流式 / 非流式、完整工具调用（tool_calls 流式聚合、多轮回灌）、
+- **账号池**：同一站点可放多个账号，额度耗尽或请求失败自动换号（见 §5.2）。
+- **上下文压缩**：超长会话自动裁剪，不再直接吃上游 400（见 §6）。
+- **能力**：流式 / 非流式、完整工具调用（tool_calls 流式聚合、多轮回灌）、
   `developer` 角色与 `tool_choice` 归一、accessToken 临期自动刷新、剩余积分与**积分倍率**查询、
   模型白/黑名单过滤、上游连接级重试与站点自动降级。
-- 另含 **`/v1/responses`**（OpenAI Responses API 兼容层），供 Codex CLI / 桌面端接入，见 §8。
-
+- **另含 `/v1/responses`**（OpenAI Responses API 兼容层），供 Codex CLI / 桌面端接入，见 §9。
 > ℹ️ 本分支（`main`）只包含 CodeBuddy / WorkBuddy 相关能力。
 > **DeepSeek 官方站点**（`chat.deepseek.com`，协议不同）的实现在 `deepseek` 分支上。
 
