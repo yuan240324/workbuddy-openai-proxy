@@ -10,7 +10,7 @@
 
 ![Node](https://img.shields.io/badge/Node.js-%E2%89%A5%2018-3c873a?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen)
+![Tests](https://github.com/yuan240324/workbuddy-openai-proxy/actions/workflows/ci.yml/badge.svg)
 ![Platform](https://img.shields.io/badge/tested%20on-Windows%20%C2%B7%20Node%2024-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -710,10 +710,15 @@ node login-deepseek.mjs        # ② 粘贴 token（自动校验，写入 auth.d
 零依赖，用 Node 内置的 `node:test`，**不需要 npm install**（Node ≥ 18）。
 
 ```bash
-npm test              # 或：node --test --experimental-test-isolation=none "test/**/*.test.mjs"
+npm test              # 或：node --test --test-reporter=spec test/*.test.mjs
 ```
 
-覆盖范围（363 个用例）：
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 **Node 18 / 20 / 22 / 24** 上跑，
+每个版本都先做语法检查再跑全量测试。CI **刻意不做 `npm install`** —— 这本身就是对「零依赖」的持续验证。
+另有一个 job 专门守住这个声明：检查 `package.json` 没声明任何依赖、仓库里没有 `node_modules` 与 lockfile、
+且在没有 `node_modules` 的情况下能导入全部 `src/` 模块。
+
+覆盖范围（371 个用例）：
 
 | 测试文件 | 覆盖内容 |
 |---|---|

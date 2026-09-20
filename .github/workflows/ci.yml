@@ -1,0 +1,105 @@
+name: CI
+
+# 这个项目零运行时依赖 —— 不需要 npm install 就能跑测试。
+# CI 刻意不做 install，本身就是对「零依赖」这句声明的持续验证。
+
+on:
+  push:
+    branches: [main, deepseek]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      # 不要 fail-fast：某个版本挂了也要看到其它版本的结果，
+      # 否则排查「是版本问题还是代码问题」时会缺信息。
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 环境信息
+        run: |
+          node --version
+          echo "package.json engines: $(node -p "require('./package.json').engines.node")"
+
+      # 语法检查：先快速失败，比等测试跑完再报语法错省时间
+      - name: 语法检查
+        run: |
+          fail=0
+          for f in *.mjs src/*.mjs; do
+            [ -e "$f" ] || continue
+            if ! node --check "$f"; then
+              echo "::error file=$f::语法检查失败"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # 不用 npm test：那条命令依赖 shell 展开 glob，直接写出来更明确；
+      # 也不加 --experimental-test-isolation，那个 flag 要 Node 22.8+。
+      - name: 跑测试（零依赖，无需 npm install）
+        run: node --test --test-reporter=spec test/*.test.mjs
+
+  zero-deps:
+    name: 零依赖声明校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # README 把「零依赖」当核心卖点，这里守住它别被无意破坏。
+      - name: package.json 不得声明任何依赖
+        run: |
+          node -e '
+            const p = require("./package.json");
+            const deps = Object.keys(p.dependencies || {});
+            const dev = Object.keys(p.devDependencies || {});
+            if (deps.length || dev.length) {
+              console.error("❌ package.json 声明了依赖，与「零依赖」不符：");
+              console.error("   dependencies:", deps.join(", ") || "(无)");
+              console.error("   devDependencies:", dev.join(", ") || "(无)");
+              process.exit(1);
+            }
+            console.log("✅ dependencies / devDependencies 均为空");
+          '
+
+      - name: 仓库里不应出现 node_modules 或 lockfile
+        run: |
+          found=0
+          for p in node_modules package-lock.json yarn.lock pnpm-lock.yaml; do
+            if [ -e "$p" ]; then echo "::error::$p 不应被提交"; found=1; fi
+          done
+          exit $found
+
+      - name: 没有 node_modules 也能正常导入全部模块
+        run: |
+          node -e '
+            const { readdirSync } = require("node:fs");
+            const files = readdirSync("src").filter((f) => f.endsWith(".mjs"));
+            console.log("待导入模块:", files.length, "个");
+          '
+          node --input-type=module -e '
+            import { readdirSync } from "node:fs";
+            const files = readdirSync("src").filter((f) => f.endsWith(".mjs"));
+            let ok = 0;
+            for (const f of files) {
+              await import("./src/" + f);
+              ok++;
+            }
+            console.log("✅ 无 node_modules 下成功导入 " + ok + "/" + files.length + " 个模块");
+          '

@@ -11,7 +11,7 @@ Covers **both editions**: China (`copilot.tencent.com`) and International
 
 ![Node](https://img.shields.io/badge/Node.js-%E2%89%A5%2018-3c873a?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen)
+![Tests](https://github.com/yuan240324/workbuddy-openai-proxy/actions/workflows/ci.yml/badge.svg)
 ![Platform](https://img.shields.io/badge/tested%20on-Windows%20%C2%B7%20Node%2024-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
@@ -398,7 +398,7 @@ Zero dependencies, Node's built-in test runner, no `npm install`:
 npm test        # or: node --test --test-reporter=spec --experimental-test-isolation=none "test/**/*.test.mjs"
 ```
 
-**363 tests passing**, covering config validation, credential refresh, account-pool rotation,
+**371 tests passing**, covering config validation, credential refresh, account-pool rotation,
 context compression, protocol translation (OpenAI ↔ Anthropic ↔ Responses), SSE aggregation,
 timeouts, and an end-to-end security suite (console origin checks, DNS rebinding, auth).
 
