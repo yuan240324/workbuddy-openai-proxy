@@ -1,7 +1,8 @@
 // 控制台后端 API：状态总览 / 模型清单 / 一键切换默认模型 / 日志 / 用量 / 探测 / 登录 / 停服
 // 仅本机可用（服务只监听 127.0.0.1），鉴权用控制台会话 token 或 config.json 的 apiKey。
 import fs from 'node:fs';
-import { siteKeys, saveConfig, paths, authPathFor, isDeepSeekSite } from './config.mjs';
+import path from 'node:path';
+import { ROOT, siteKeys, saveConfig, paths, authPathFor, isDeepSeekSite } from './config.mjs';
 import { getAuth, isLoggedIn, accountSnapshot } from './auth.mjs';
 import {
   poolPathFor,
@@ -23,6 +24,25 @@ import { sendJson } from './util.mjs';
 
 const startedAt = Date.now();
 const loginStates = new Map(); // site → { state, authUrl, at }
+
+/**
+ * 从 package.json 读版本号。
+ *
+ * 原先这里是硬编码的 '1.1.0'，结果 package.json 升到 1.2.0 后控制台还显示旧版本，
+ * 排查问题时对着版本号看会误导。改成单一来源，不再两处维护。
+ * 读不到时返回 'unknown' 而不是抛错——控制台不该因为读不到版本号就打不开。
+ */
+let cachedVersion = null;
+function pkgVersion() {
+  if (cachedVersion) return cachedVersion;
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    cachedVersion = p.version || 'unknown';
+  } catch {
+    cachedVersion = 'unknown';
+  }
+  return cachedVersion;
+}
 
 function maskKey(k) {
   if (!k) return '';
@@ -109,7 +129,7 @@ export async function handleConsoleApi(ctx) {
       sites.push(info);
     }
     return sendJson(res, 200, {
-      version: '1.1.0',
+      version: pkgVersion(),
       uptime_ms: Date.now() - startedAt,
       node: process.version,
       platform: process.platform,
