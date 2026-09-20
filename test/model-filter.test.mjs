@@ -10,7 +10,7 @@ import { isExcluded, explainExcluded } from '../src/router.mjs';
 const mkCfg = (over = {}) => ({
   allowModels: [],
   excludeModels: [],
-  sites: { 'cn-cli': { enabled: true }, 'site-b': { enabled: true } },
+  sites: { 'cn-cli': { enabled: true }, deepseek: { enabled: true } },
   ...over,
 });
 
@@ -39,11 +39,11 @@ describe('isExcluded：白名单与黑名单', () => {
   });
 
   test('通配符前缀匹配', () => {
-    const cfg = mkCfg({ allowModels: ['glm-5*'] });
-    assert.equal(isExcluded(cfg, 'cn-cli', 'glm-5.3'), false);
-    assert.equal(isExcluded(cfg, 'cn-cli', 'glm-5.2'), false);
-    assert.equal(isExcluded(cfg, 'cn-cli', 'kimi-k3'), true);
-    assert.equal(isExcluded(cfg, 'cn-cli', 'hy3'), true);
+    const cfg = mkCfg({ allowModels: ['deepseek-v4*'] });
+    assert.equal(isExcluded(cfg, 'cn-cli', 'deepseek-v4-pro'), false);
+    assert.equal(isExcluded(cfg, 'cn-cli', 'deepseek-v4.1-flash'), false);
+    assert.equal(isExcluded(cfg, 'cn-cli', 'deepseek-chat'), true);
+    assert.equal(isExcluded(cfg, 'cn-cli', 'deepseek-reasoner'), true);
   });
 });
 
@@ -53,8 +53,8 @@ describe('explainExcluded：必须指出真实原因', () => {
   });
 
   test('原因是白名单没命中时，说 allowModels 而不是 excludeModels', () => {
-    const cfg = mkCfg({ allowModels: ['glm-5*', 'hy*'] });
-    const why = explainExcluded(cfg, 'site-b', 'kimi-k3');
+    const cfg = mkCfg({ allowModels: ['glm-*', 'deepseek-v4*'] });
+    const why = explainExcluded(cfg, 'deepseek', 'deepseek-chat');
     assert.ok(why, '应给出原因');
     assert.match(why, /allowModels/, '应指向 allowModels');
     assert.ok(!/excludeModels/.test(why), `不应误指 excludeModels：${why}`);
@@ -86,15 +86,14 @@ describe('explainExcluded：必须指出真实原因', () => {
     assert.match(why, /allowModels/);
   });
 
-  test('真实场景：白名单只放行部分前缀，其余站点的模型全部被挡', () => {
-    // 复现线上 config：allowModels = ["glm-5*","hy*"]
-    const cfg = mkCfg({ allowModels: ['glm-5*', 'hy*'] });
-    for (const id of ['kimi-k3', 'minimax-m3', 'claude-sonnet-4.6']) {
-      assert.equal(isExcluded(cfg, 'site-b', id), true, `${id} 应被排除`);
-      assert.match(explainExcluded(cfg, 'site-b', id), /allowModels/);
+  test('真实场景：用户白名单放行 deepseek-v4*，官方站点模型全部被挡', () => {
+    // 复现线上 config：allowModels = ["glm-*","deepseek-v4*"]
+    const cfg = mkCfg({ allowModels: ['glm-*', 'deepseek-v4*'] });
+    for (const id of ['deepseek-chat', 'deepseek-reasoner', 'deepseek-search']) {
+      assert.equal(isExcluded(cfg, 'deepseek', id), true, `${id} 应被排除`);
+      assert.match(explainExcluded(cfg, 'deepseek', id), /allowModels/);
     }
-    // 而命中的前缀是放行的
-    assert.equal(isExcluded(cfg, 'cn-cli', 'glm-5.3'), false);
-    assert.equal(isExcluded(cfg, 'cn-cli', 'hy3'), false);
+    // 而国内版的 deepseek-v4* 是放行的
+    assert.equal(isExcluded(cfg, 'cn-cli', 'deepseek-v4-pro'), false);
   });
 });

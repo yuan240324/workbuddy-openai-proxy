@@ -1,6 +1,6 @@
 // 额度查询的适用性判断（回归）
 //
-// 背景：部分站点协议不同，预设里没有 billingBase，
+// 背景：DeepSeek 官方站点协议不同，预设里没有 billingBase，
 // 但 /status 与控制台原先无条件调用 queryCredit，导致拼出
 // "undefined/v2/billing/meter/get-user-resource" 这种无效 URL，
 // 并被当作「30s 超时或网络异常」上报 —— 把「该站点不适用」误报成网络故障。
@@ -42,11 +42,11 @@ const WITH_BILLING = {
   billingBase: `http://127.0.0.1:${PORT}`,
   origin: 'https://x.test', userAgent: 'T/1',
 };
-// 模拟「不使用 CodeBuddy 计费接口」的站点：有 apiBase / origin，但没有 billingBase
+// 模拟 DeepSeek 官方站点：有 apiBase / origin，但没有 billingBase
 const NO_BILLING = {
-  label: 'NB', enabled: true,
+  label: 'DS', enabled: true, protocol: 'deepseek',
   apiBase: `http://127.0.0.1:${PORT}`,
-  origin: 'https://nb.test', userAgent: 'T/1',
+  origin: 'https://chat.deepseek.com', userAgent: 'T/1',
 };
 
 before(async () => { await new Promise((r) => server.listen(PORT, '127.0.0.1', r)); });
@@ -70,7 +70,7 @@ describe('supportsCreditQuery：判断站点是否支持额度查询', () => {
     assert.equal(supportsCreditQuery(cfg, 'cn-cli'), true);
   });
 
-  test('缺 billingBase 的站点 → 不支持', () => {
+  test('缺 billingBase 的站点（如 DeepSeek 官方）→ 不支持', () => {
     const cfg = mkCfg({ 'cn-cli': NO_BILLING });
     assert.equal(supportsCreditQuery(cfg, 'cn-cli'), false);
   });
