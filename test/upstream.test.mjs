@@ -162,6 +162,80 @@ describe('prepareBody：stripFields', () => {
   });
 });
 
+describe('prepareBody：剥离客户端指纹（回归 #1 #2）', () => {
+  // 上游对 system 做「客户端指纹」精确匹配，命中就回
+  //   400 Illegal API invocation from an unapproved channel
+  // 实测只认完整原句，拆开任一部分都放行，说明是精确黑名单而非关键词过滤。
+  // 受影响：Claude Code、Claude desktop 的 /code 面板。
+  const 指纹 = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+  test('命中指纹时被剥离', () => {
+    const out = prepareBody(cfg(), {
+      messages: [{ role: 'system', content: 指纹 }, user()],
+    });
+    assert.ok(!out.messages[0].content.includes('Anthropic'), '指纹应被剥离');
+  });
+
+  test('system 的其余内容原样保留', () => {
+    const out = prepareBody(cfg(), {
+      messages: [{ role: 'system', content: `${指纹}\n\nYou are an interactive CLI tool.` }, user()],
+    });
+    assert.ok(out.messages[0].content.includes('interactive CLI tool'), '其余指令不该丢');
+    assert.ok(!out.messages[0].content.includes('official CLI for Claude'));
+  });
+
+  test('整条 system 就是指纹时，用默认提示词兜底（不留空串）', () => {
+    const out = prepareBody(cfg(), { messages: [{ role: 'system', content: 指纹 }, user()] });
+    assert.equal(out.messages[0].role, 'system');
+    assert.equal(out.messages[0].content, 'You are a helpful AI assistant.');
+  });
+
+  test('只剥离 system，不动 user 内容', () => {
+    const out = prepareBody(cfg(), {
+      messages: [{ role: 'system', content: 'sys' }, { role: 'user', content: 指纹 }],
+    });
+    assert.equal(out.messages[1].content, 指纹, 'user 里的同样文字不应被改');
+  });
+
+  test('不误伤：拆开的部分、其他客户端提示词都原样保留', () => {
+    const 不该动 = [
+      'You are Claude Code',                                  // 只有前半
+      "Anthropic's official CLI for Claude",                  // 只有后半
+      'You are a coding agent running in the Codex CLI.',     // Codex
+      'You are an AI coding assistant. You operate in Cursor.',
+      '你是一个有帮助的助手。',
+    ];
+    for (const c of 不该动) {
+      const out = prepareBody(cfg(), { messages: [{ role: 'system', content: c }, user()] });
+      assert.equal(out.messages[0].content, c, `不该改动：${c}`);
+    }
+  });
+
+  test('stripClientFingerprint=false 时完全不处理', () => {
+    const out = prepareBody(cfg({ stripClientFingerprint: false }), {
+      messages: [{ role: 'system', content: 指纹 }, user()],
+    });
+    assert.equal(out.messages[0].content, 指纹, '关掉开关后应原样透传');
+  });
+
+  test('大小写与末尾句号容错', () => {
+    for (const v of [
+      'you are claude code, anthropic\'s official CLI for claude',
+      "You are Claude Code, Anthropic's official CLI for Claude.\n\nextra",
+    ]) {
+      const out = prepareBody(cfg(), { messages: [{ role: 'system', content: v }, user()] });
+      assert.ok(!/official CLI for Claude/i.test(out.messages[0].content), `应被剥离：${v.slice(0, 40)}`);
+    }
+  });
+
+  test('非字符串 content（多模态数组）不崩', () => {
+    const out = prepareBody(cfg(), {
+      messages: [{ role: 'system', content: [{ type: 'text', text: 指纹 }] }, user()],
+    });
+    assert.ok(Array.isArray(out.messages[0].content), '数组内容应原样保留');
+  });
+});
+
 describe('classifyFrame：区分正常 chunk 与错误信封', () => {
   test('正常 chunk 被识别', () => {
     const r = classifyFrame(JSON.stringify({ choices: [{ delta: { content: 'hi' } }] }));
