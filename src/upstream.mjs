@@ -9,6 +9,52 @@ import { fitMessages, estimateMessages, learnedLimit, isTooLongError } from './c
 import { chatHeaders, billingHeaders } from './headers.mjs';
 import { warn } from './log.mjs';
 
+/**
+ * 上游对 system 消息做「客户端指纹」精确匹配，命中就回：
+ *   400 Illegal API invocation from an unapproved channel
+ *
+ * 实测（2026-09，cn-cli 与 intl-cli、/v1/chat/completions 与 /v1/messages 均一致）：
+ *   ❌ 完整原句 "You are Claude Code, Anthropic's official CLI for Claude."
+ *   ✅ 只留 "You are Claude Code"
+ *   ✅ 只留 "Anthropic's official CLI for Claude"
+ *   ✅ 同样内容放 user 位置
+ * 说明上游维护的是一份**精确黑名单**，而不是关键词过滤。
+ *
+ * 已知影响面：Claude Code、以及 Claude desktop 的 /code 面板（开头就是这句话）。
+ * Claude desktop 的 /cowork 面板提示词不同，所以同一账号下 /cowork 正常、/code 报 400。
+ *
+ * 只剥离命中的那一句，system 提示词的其余内容原样保留，不改动用户的实质指令。
+ * 多一条可疑模式就多一份误伤风险，所以**这里只放实测确认过的**，
+ * 以后遇到新的指纹再按同样方式验证后追加。
+ */
+const CLIENT_FINGERPRINTS = [
+  /You are Claude Code,\s*Anthropic's official CLI for Claude\.?/i,
+];
+
+/**
+ * 从 system 消息里剥离客户端指纹。返回被改动的消息条数。
+ * 若剥离后内容为空，用 fallbackPrompt 兜底（否则首条 system 会变成空串）。
+ */
+export function stripClientFingerprint(messages, fallbackPrompt) {
+  if (!Array.isArray(messages)) return 0;
+  let 改动数 = 0;
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    if (String(m.role || '').toLowerCase() !== 'system') continue;
+    if (typeof m.content !== 'string' || !m.content) continue;
+    let next = m.content;
+    for (const re of CLIENT_FINGERPRINTS) {
+      if (!re.test(next)) continue;
+      next = next.replace(re, '').replace(/\n{3,}/g, '\n\n').trim();
+    }
+    if (next !== m.content) {
+      m.content = next || fallbackPrompt;
+      改动数++;
+    }
+  }
+  return 改动数;
+}
+
 /** 上游请求体改写：强制流式 + 首条必须为 system + 角色/工具选择归一 + 剔除配置中要求剔除的字段。 */
 export function prepareBody(cfg, src) {
   const body = { ...src };
@@ -19,6 +65,16 @@ export function prepareBody(cfg, src) {
     for (const m of body.messages) {
       if (m && typeof m === 'object' && typeof m.role === 'string' && m.role.toLowerCase() === 'developer') {
         m.role = 'system';
+      }
+    }
+
+    // 剥离客户端指纹。放在「首条必须 system」之前：
+    // 这样万一整条 system 就是指纹，兜底后的默认提示词也能顶上去。
+    if (cfg.stripClientFingerprint !== false) {
+      const fallback = cfg.defaultSystemPrompt || 'You are a helpful AI assistant.';
+      const n = stripClientFingerprint(body.messages, fallback);
+      if (n) {
+        warn(`已剥离 ${n} 处客户端指纹（上游会因此回 400 "Illegal API invocation from an unapproved channel"）`);
       }
     }
 

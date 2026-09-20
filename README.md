@@ -622,6 +622,7 @@ node login-deepseek.mjs        # ② 粘贴 token（自动校验，写入 auth.d
 | 402 额度不足 | 该站点剩余积分用完（两边额度不通用，可切到另一站点） |
 | 429 限流 | 稍后重试，降低并发 |
 | `model xxx is only available for authorized users` | 该模型你的账号无权限，换第 7 节清单里的模型 |
+| `400 Illegal API invocation from an unapproved channel` | 上游识别出了客户端的 system 提示词指纹。**v1.2.0 起已自动剥离**（见下方说明），旧版请升级；也可把 `config.json` 的 `stripClientFingerprint` 显式设为 `true` |
 | 国际版报 401/500 但国内版正常 | 国际版是独立账号体系，需要单独 `--site intl-cli` / `--site intl-work` 登录 |
 | 模型回答被截断 | 上游「思考」也计入输出 token；在 TraeWork 高级配置里调大输出上下文窗口 |
 | TraeWork 里模型列表为空 | TraeWork 不拉 `/v1/models`，模型 ID 手填即可 |

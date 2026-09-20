@@ -161,6 +161,11 @@ export function defaultConfig() {
     defaultSystemPrompt: 'You are a helpful AI assistant.',
     // 出站请求体里需要剔除的字段（一般留空）
     stripFields: [],
+    // 上游对 system 消息做「客户端指纹」精确匹配，命中就回
+    // 400 Illegal API invocation from an unapproved channel。
+    // Claude Code、以及 Claude desktop 的 /code 面板会命中（其开场白被列入黑名单）；
+    // 剥离后即可正常使用。设为 false 可关闭。
+    stripClientFingerprint: true,
     // 模型白名单 / 黑名单（支持 `*` 通配符；站点级也能配 allowModels / excludeModels）
     // allowModels 非空时只保留命中的模型，excludeModels 命中即剔除。
     allowModels: [],
@@ -304,6 +309,14 @@ export function validateConfig(cfg, defaults = defaultConfig()) {
     const kept = cfg.stripFields.filter(isStr);
     fix(`stripFields 含非字符串项，已剔除 ${cfg.stripFields.length - kept.length} 项`);
     cfg.stripFields = kept;
+  }
+
+  // ---- 客户端指纹剥离（布尔开关；写错类型时回退为默认的 true）----
+  if (typeof cfg.stripClientFingerprint !== 'boolean') {
+    if (cfg.stripClientFingerprint !== undefined) {
+      fix(`stripClientFingerprint 必须是布尔值，已回退为 ${defaults.stripClientFingerprint}`);
+    }
+    cfg.stripClientFingerprint = defaults.stripClientFingerprint;
   }
 
   if (!isPlainObject(cfg.modelRoutes)) {
