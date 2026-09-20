@@ -120,7 +120,7 @@ describe('validateConfig：sites（原先 null 会让站点静默消失）', () 
     cfg.sites = null;
     const issues = validateConfig(cfg);
     assert.ok(Object.keys(cfg.sites).length >= 3, '应恢复内置站点');
-    // 三个内置站点都应恢复
+    // 至少覆盖三个 CodeBuddy 站点（DeepSeek 官方站点也内置，但不强制其存在）
     for (const s of ['cn-cli', 'intl-cli', 'intl-work']) {
       assert.ok(cfg.sites[s], `应恢复内置站点 ${s}`);
     }
