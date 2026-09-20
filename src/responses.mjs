@@ -7,8 +7,9 @@
 //
 // 设计原则：只新增，不改动 /v1/chat/completions 的任何既有行为。
 import { resolveTarget } from './router.mjs';
+import { openUpstreamRotating } from './dispatch.mjs';
 import { isGatewayError } from './openai.mjs';
-import { openChat, openChatRotating, classifyFrame, upstreamErrorMessage } from './upstream.mjs';
+import { classifyFrame, upstreamErrorMessage } from './upstream.mjs';
 import { recordUsage } from './usage.mjs';
 import { startSSE, writeSSEEvent, sendJson, sendError, estimateTokens } from './util.mjs';
 import { requestLog, warn } from './log.mjs';
@@ -253,14 +254,14 @@ export async function handleResponses(ctx) {
   const chatReq = toChatRequest({ ...body, model });
   const requestModel = target.requested;
 
-  let up = (await openChatRotating(cfg, site, chatReq, { signal })).up;
+  let up = (await openUpstreamRotating(cfg, site, chatReq, { signal })).up;
   // 站点降级：上游网关故障（openresty/APISIX 返回 502/503/504）→ 换备用站点重试一次
   if (!up.ok && target.fallback && site !== target.fallback.site && isGatewayError(up.status)) {
     warn(`[${site}] 上游网关 ${up.status}，自动降级到备用站点 ${target.fallback.site} 重试`);
     site = target.fallback.site;
     model = target.fallback.model;
     chatReq.model = target.fallback.model;
-    up = (await openChatRotating(cfg, site, chatReq, { signal })).up;
+    up = (await openUpstreamRotating(cfg, site, chatReq, { signal })).up;
   }
   if (!up.ok) {
     requestLog({ site, model, mode: 'responses', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });

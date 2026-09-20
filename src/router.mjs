@@ -1,9 +1,10 @@
 // 站点路由：把「模型名」映射到「哪个站点 + 该站点上的模型 ID」。
 // 规则优先级：显式站点前缀 → 别名 → config.modelRoutes → 站点目录匹配（倍率最低优先） → 默认站点。
-import { siteKeys } from './config.mjs';
+import { siteKeys, isDeepSeekSite } from './config.mjs';
 import { isLoggedIn } from './auth.mjs';
 import { fetchModels } from './upstream.mjs';
 import { learnLimit } from './compress.mjs';
+import { deepseekModels } from './deepseek-adapter.mjs';
 
 const TTL_OK = 5 * 60 * 1000;
 const TTL_ERR = 60 * 1000;
@@ -78,6 +79,15 @@ export async function getCatalog(cfg, site, { force = false } = {}) {
       if (m?.id && m.contextWindow) learnLimit(site, m.id, m.contextWindow);
     }
   };
+
+  // DeepSeek 官方站点没有可拉取的模型目录接口，直接用站点预设清单
+  if (isDeepSeekSite(cfg.sites?.[site])) {
+    const seed = deepseekModels(cfg, site);
+    登记上限(seed);
+    const entry = { at: Date.now(), ttl: TTL_OK, models: 过滤(seed), error: null, source: 'seed' };
+    catalogs.set(site, entry);
+    return entry;
+  }
   try {
     const list = await fetchModels(cfg, site);
     登记上限(list);
@@ -121,7 +131,7 @@ function splitPrefix(cfg, raw) {
  * 若 raw 形如 `站点/模型`、且该站点存在但已被禁用，返回站点名；否则返回 null。
  *
  * 为什么要单独识别：splitPrefix 对已禁用站点返回 null，
- * 于是 `站点/模型` 会被整体当成模型名继续往下走，
+ * 于是 `deepseek/xxx` 会被整体当成模型名继续往下走，
  * 最后报成「不在 allowModels 白名单里」——真正的原因是站点被禁用了，
  * 提示把人引向完全无关的配置项。
  */

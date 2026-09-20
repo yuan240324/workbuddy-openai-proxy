@@ -1,7 +1,7 @@
 // OpenAI 兼容路由：/v1/models、/v1/chat/completions（流式 + 非流式，支持工具调用）
 // 多站点：请求里的 model 可写裸 ID（自动选站点），也可写 `站点/模型` 显式指定。
-import { openChat, openChatRotating, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
-import { ensureToken } from './auth.mjs';
+import { aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
+import { openUpstreamRotating } from './dispatch.mjs';
 import { resolveTarget, mergedModels, parseMultiplier, isExcluded } from './router.mjs';
 import { recordUsage } from './usage.mjs';
 import { startSSE, writeSSE, sendJson, sendError, estimateTokens } from './util.mjs';
@@ -34,11 +34,14 @@ export function normalizeChunk(obj, publicModel) {
 }
 
 /**
- * 发起上游请求（含账号轮换）。账号层面的处理全在 openChatRotating 里：
- * 401 先原地刷 token，仍失败则换号；这里只负责把结果交给上层做站点降级。
+ * 发起上游请求（含账号轮换 + 按站点协议分发）。
+ *
+ * 账号层面（401 原地刷 token、仍失败换号）与上下文压缩都在
+ * openChatRotating 里；DeepSeek 官方站点走它自己的协议实现。
+ * 这里只负责把结果交给上层做站点降级。
  */
 async function openWithRetry(cfg, site, body, signal, opts = {}) {
-  const r = await openChatRotating(cfg, site, body, { signal, ...opts });
+  const r = await openUpstreamRotating(cfg, site, body, { signal, ...opts });
   return r.up;
 }
 

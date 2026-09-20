@@ -1,6 +1,7 @@
 // Anthropic 兼容路由：/v1/messages、/v1/messages/count_tokens
 // Trae 的「Claude 型自定义模型」走 Anthropic Messages 协议，这里做双向转换。
-import { openChat, openChatRotating, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
+import { aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
+import { openUpstreamRotating } from './dispatch.mjs';
 import { resolveTarget } from './router.mjs';
 import { isModelNotFound, isTransportFailure, isGatewayError } from './openai.mjs';
 import { recordUsage } from './usage.mjs';
@@ -129,8 +130,9 @@ export async function handleMessages(ctx) {
   const openaiBody = toOpenAIBody({ ...body, model });
   if (openaiBody.max_tokens === undefined) openaiBody.max_tokens = cfg.defaultMaxTokens;
 
-  // 请求上游（openChatRotating 内部处理 401 刷 token 与换号）；连接级失败时降级到备用站点
-  const 打开一次 = async () => openChatRotating(cfg, site, openaiBody, { signal }).then((r) => r.up);
+  // 请求上游（openChatRotating 内部处理 401 刷 token、换号与上下文压缩）；
+  // 连接级失败时降级到备用站点
+  const 打开一次 = async () => openUpstreamRotating(cfg, site, openaiBody, { signal }).then((r) => r.up);
 
   let up;
   try {
@@ -181,7 +183,7 @@ export async function handleMessages(ctx) {
     const askedMax = Number(body.max_tokens ?? 0);
     if (!agg.content && agg.toolCallList.length === 0 && askedMax > 0 && askedMax < 1024) {
       warn(`[${site}] 空回答（finish=${agg.finishReason}，max_tokens=${askedMax}），放大到 1024 重试一次`);
-      const up2 = await openChat(cfg, site, { ...openaiBody, max_tokens: Math.max(1024, askedMax * 4) }, { signal });
+      const up2 = await openUpstream(cfg, site, { ...openaiBody, max_tokens: Math.max(1024, askedMax * 4) }, { signal });
       if (up2.ok) {
         try {
           agg = await aggregateFrames(up2.frames);

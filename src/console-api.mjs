@@ -1,7 +1,7 @@
 // 控制台后端 API：状态总览 / 模型清单 / 一键切换默认模型 / 日志 / 用量 / 探测 / 登录 / 停服
 // 仅本机可用（服务只监听 127.0.0.1），鉴权用控制台会话 token 或 config.json 的 apiKey。
 import fs from 'node:fs';
-import { siteKeys, saveConfig, paths, authPathFor } from './config.mjs';
+import { siteKeys, saveConfig, paths, authPathFor, isDeepSeekSite } from './config.mjs';
 import { getAuth, isLoggedIn, accountSnapshot } from './auth.mjs';
 import {
   poolPathFor,
@@ -13,7 +13,9 @@ import {
   markExhausted,
 } from './pool.mjs';
 import { getCatalog, mergedModels, parseMultiplier } from './router.mjs';
-import { openChat, queryCredit, classifyFrame, upstreamErrorMessage, supportsCreditQuery } from './upstream.mjs';
+import { queryCredit, classifyFrame, upstreamErrorMessage, supportsCreditQuery } from './upstream.mjs';
+import { openUpstream } from './dispatch.mjs';
+import { verifyToken, saveToken } from './deepseek.mjs';
 import { startLogin, pollLogin } from './device-login.mjs';
 import { usageSnapshot, resetUsage, flushUsage, recordBalance } from './usage.mjs';
 import { recentLogs } from './log.mjs';
@@ -56,7 +58,7 @@ async function siteSummary(cfg, site) {
 async function probeModel(cfg, site, model) {
   const t0 = Date.now();
   try {
-    const up = await openChat(cfg, site, {
+    const up = await openUpstream(cfg, site, {
       model,
       stream: true,
       max_tokens: 1,
@@ -92,7 +94,7 @@ export async function handleConsoleApi(ctx) {
     const sites = [];
     for (const s of siteKeys(cfg)) {
       const info = await siteSummary(cfg, s);
-      // 没有配置 billingBase 的站点不走计费接口，
+      // 协议不同的站点（如 DeepSeek 官方）不走 CodeBuddy 计费接口，
       // 跳过查询而不是报错，前端会显示「—」。
       if (info.logged_in && supportsCreditQuery(cfg, s)) {
         try {
@@ -270,11 +272,49 @@ export async function handleConsoleApi(ctx) {
     const body = ctx.body || {};
     const site = String(body.site || cfg.defaultSite);
     if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
+    // DeepSeek 官方站点没有设备授权流程，只能粘贴 token
+    if (isDeepSeekSite(cfg.sites[site])) {
+      return sendJson(res, 400, {
+        error: 'DeepSeek 官方站点不支持设备授权登录，请用「粘贴 token」方式',
+        need_token: true,
+        hint: '浏览器登录 chat.deepseek.com → F12 Console → JSON.parse(localStorage.getItem("userToken")).value',
+      });
+    }
     const r = await startLogin(cfg, site);
     loginStates.set(site, { ...r, label: body.label ? String(body.label).slice(0, 40) : null });
     return sendJson(res, 200, r);
   }
 
+  // ---- 粘贴 token 登录（DeepSeek 官方站点专用） ----
+  if (p === '/login/token' && method === 'POST') {
+    const body = ctx.body || {};
+    const site = String(body.site || 'deepseek');
+    if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
+    if (!isDeepSeekSite(cfg.sites[site])) {
+      return sendJson(res, 400, { error: `${site} 不是 token 型站点，请用设备授权登录` });
+    }
+    let token = String(body.token || '').trim();
+    if (!token) return sendJson(res, 400, { error: '缺少 token' });
+    // 容忍误带 {"value":"xxx"} 包装
+    if (token.startsWith('{')) {
+      try {
+        const j = JSON.parse(token);
+        if (j.value) token = String(j.value).trim();
+      } catch { /* 保持原样 */ }
+    }
+    try {
+      const info = await verifyToken(token);
+      saveToken(token);
+      const u = info.user || info;
+      return sendJson(res, 200, {
+        ok: true,
+        site,
+        account: u.email || u.mobile_number || u.id || null,
+      });
+    } catch (e) {
+      return sendJson(res, 401, { error: `token 校验失败：${e.message}` });
+    }
+  }
   if (p === '/login/poll' && method === 'GET') {
     const site = String(url.searchParams.get('site') || cfg.defaultSite);
     const st = loginStates.get(site);

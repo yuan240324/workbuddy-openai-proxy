@@ -237,7 +237,7 @@ const server = http.createServer(async (req, res) => {
       for (const site of keys) {
         const a = getAuth(site);
         let credit = null;
-        // 没有配置 billingBase 的站点不走计费接口，
+        // 协议不同的站点（如 DeepSeek 官方）不走 CodeBuddy 计费接口，
         // 这里直接跳过，避免把「不适用」误报成查询失败。
         const creditSupported = supportsCreditQuery(cfg, site);
         if (isLoggedIn(site) && creditSupported) {

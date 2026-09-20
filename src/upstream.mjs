@@ -465,8 +465,8 @@ export async function fetchModels(cfg, site) {
 /**
  * 该站点是否支持额度查询。
  *
- * 没有配置 billingBase 的站点不使用 CodeBuddy 的计费接口，
- * 站点预设里本就没有该字段。此时不应发起查询——否则会拼出
+ * 不同协议的站点（如 DeepSeek 官方走 PoW + /api/v0/*）不使用 CodeBuddy 的计费接口，
+ * 站点预设里本就没有 billingBase。此时不应发起查询——否则会拼出
  * "undefined/v2/billing/meter/get-user-resource" 这种无效 URL，
  * 还会被当作网络故障上报，把「该站点不适用」误报成「超时」。
  */
