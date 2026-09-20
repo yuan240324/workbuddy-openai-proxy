@@ -12,5 +12,25 @@ node_modules/
 *.log
 _ref/
 
+# 配置备份（手工改动前的快照，含本机信息，不入库）
+config.json.bak-*
+
+# 浏览器用户目录：调试/自动登录时生成，含 Cookie 与登录态，**绝不能提交**
+.chrome-login/
+.chrome-profile/
+.puppeteer-data/
+playwright-report/
+test-results/
+
+# 运行输出（start-hidden / login 脚本重定向产生的）
+login-out.txt
+login-err.txt
+serve-out.txt
+serve-err.txt
+
 # 与本项目无关的其他目录（各自独立，不与本仓库混合提交）
 zcode-proxy/
+zcode-proxy-deploy/
+zcode-api-master.zip
+_src/
+.tools/
