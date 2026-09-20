@@ -2,8 +2,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
-export const ROOT = path.resolve(import.meta.dirname, '..');
+// 用 fileURLToPath + dirname 而不是 import.meta.dirname：
+// 后者要 Node ≥ 20.11，会让 README 声明的「≥ 18」变成假的
+// （Node 18 上 import.meta.dirname 是 undefined，path.resolve 直接抛 TypeError，
+//   服务根本起不来）。等价的写法从 Node 12 起就能用。
+export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // 配置目录：默认就是项目根目录。测试可通过 WB_CONFIG_DIR 环境变量或
 // setConfigDir() 指向临时目录，避免单测污染仓库里的 config.json / auth.*.json / usage.json。
