@@ -218,6 +218,26 @@
   .pill.paid { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
   .pill.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
   .pill.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+  .pill.warn { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+
+  /* ---------- 账号池 ---------- */
+  .acct-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+  .acct {
+    border: 1px solid var(--line); border-radius: var(--r-md);
+    padding: 9px 11px; background: var(--surface-2);
+    transition: border-color var(--t-fast);
+  }
+  .acct:hover { border-color: var(--fg-3); }
+  .acct-off { opacity: 0.55; }
+  .acct-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .acct-name { font-weight: 600; font-size: var(--fz-md); }
+  .acct-meta { color: var(--fg-3); font-size: var(--fz-xs); margin-top: 5px; }
+  .acct-err {
+    color: var(--bad); font-size: var(--fz-xs); margin-top: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .acct-ops { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .btn.mini { padding: 3px 9px; font-size: var(--fz-xs); border-radius: var(--r-sm); }
 
   /* ---------- 按钮 ---------- */
   button { font: inherit; }
@@ -499,8 +519,9 @@ async function loadState() {
         ${s.enabled ? '' : '<span class="pill">已禁用</span>'}</h3>
       <div class="kv"><span>站点键</span><span>${esc(s.site)}</span></div>
       <div class="kv"><span>上游</span><span>${esc(s.apiBase)}</span></div>
-      <div class="kv"><span>登录</span><span>${s.logged_in ? '已登录 ' + esc(s.uid || '') : '未登录'}</span></div>
-      ${s.nickname ? `<div class="kv"><span>昵称</span><span>${esc(s.nickname)}</span></div>` : ''}
+      <div class="kv"><span>账号池</span><span>${s.account_count
+        ? `<b>${s.account_count}</b> 个（${s.account_usable} 个可用）`
+        : '未登录'}</span></div>
       <div class="kv"><span>剩余额度</span><span>${s.credit !== undefined ? '<b>' + s.credit + '</b> credits' : (s.credit_error ? '<span class="pill bad">查询失败</span>' : '—')}</span></div>
       <div class="kv"><span>可用模型</span><span>${s.model_count} 个${s.catalog_source === 'seed' ? '（内置清单）' : ''}</span></div>
       <div class="kv"><span>token 到期</span><span>${s.token_expires_at ? new Date(s.token_expires_at).toLocaleString() : '—'}</span></div>
@@ -616,26 +637,100 @@ async function pollLogs() {
   } catch { /* 忽略 */ }
 }
 
-// ---------- 账号 ----------
+// ---------- 账号（号池） ----------
+function acctStatusPill(a) {
+  if (!a.enabled) return '<span class="pill">已禁用</span>';
+  if (a.exhausted) return '<span class="pill bad">额度耗尽</span>';
+  if (a.usable) return '<span class="pill ok">可用</span>';
+  if (a.cooldown_until) return '<span class="pill warn">冷却中</span>';
+  return '<span class="pill warn">不可用</span>';
+}
+
 function renderAccounts() {
   if (!STATE) return;
-  $('accountCards').innerHTML = STATE.sites.map((s) => `
+  $('accountCards').innerHTML = STATE.sites.map((s) => {
+    const accounts = s.accounts || [];
+    const 概览 = accounts.length
+      ? `${accounts.length} 个账号，${s.account_usable || 0} 个可用`
+      : '未登录';
+    return `
     <div class="card">
-      <h3><span class="dot ${s.logged_in ? 'on' : 'off'}"></span>${esc(s.label)}</h3>
+      <h3><span class="dot ${s.logged_in ? 'on' : 'off'}"></span>${esc(s.label)}
+        <span class="pill" style="margin-left:6px">${esc(概览)}</span></h3>
       <div class="kv"><span>站点键</span><span>${esc(s.site)}</span></div>
-      <div class="kv"><span>状态</span><span>${s.logged_in ? '已登录 ' + esc(s.uid || '') : '未登录'}</span></div>
+      ${accounts.length ? `<div class="acct-list">${accounts.map((a) => acctRow(s.site, a)).join('')}</div>`
+        : '<div class="muted" style="margin:8px 0">还没有账号，点下面的按钮添加。</div>'}
       <div class="row" style="margin-top:10px">
-        <button class="btn primary" onclick="startLogin('${esc(s.site)}')">${s.logged_in ? '重新登录' : '开始登录'}</button>
-        ${s.logged_in ? `<button class="btn danger" onclick="logout('${esc(s.site)}')">退出登录</button>` : ''}
+        <button class="btn primary" onclick="startLogin('${esc(s.site)}')">添加账号</button>
+        <button class="btn" onclick="refreshPool('${esc(s.site)}')">刷新余额</button>
+        ${accounts.length ? `<button class="btn danger" onclick="logout('${esc(s.site)}')">清空账号池</button>` : ''}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+function acctRow(site, a) {
+  const 到期 = a.expires_at ? new Date(a.expires_at).toLocaleDateString() : '—';
+  const 余额 = a.credit !== undefined ? `${a.credit} 积分`
+    : a.credit_error ? `<span class="muted" title="${esc(a.credit_error)}">查询失败</span>` : '—';
+  return `
+    <div class="acct ${a.usable ? '' : 'acct-off'}">
+      <div class="acct-head">
+        <span class="acct-name">${esc(a.label)}</span>
+        ${acctStatusPill(a)}
+        ${a.is_default ? '<span class="pill">默认</span>' : ''}
+      </div>
+      <div class="acct-meta">
+        uid ${esc(String(a.uid || '').slice(0, 8))}… · 余额 ${余额} · token 至 ${esc(到期)}
+        ${a.fail_count ? ` · 连续失败 ${a.fail_count} 次` : ''}
+      </div>
+      ${a.last_error ? `<div class="acct-err" title="${esc(a.last_error)}">${esc(a.last_error.slice(0, 90))}</div>` : ''}
+      <div class="acct-ops">
+        <button class="btn mini" onclick="renameAccount('${esc(site)}','${esc(a.id)}','${esc(a.label)}')">改名</button>
+        <button class="btn mini" onclick="toggleAccount('${esc(site)}','${esc(a.id)}',${a.enabled ? 'false' : 'true'})">${a.enabled ? '禁用' : '启用'}</button>
+        ${(a.exhausted || a.fail_count) ? `<button class="btn mini" onclick="resetAccount('${esc(site)}','${esc(a.id)}')">重置状态</button>` : ''}
+        <button class="btn mini danger" onclick="removeAccount('${esc(site)}','${esc(a.id)}','${esc(a.label)}')">删除</button>
+      </div>
+    </div>`;
+}
+
+async function poolPost(path, body) {
+  await api(path, { method: 'POST', body });
+  await loadState();
+  renderAccounts();
+}
+
+async function toggleAccount(site, id, enabled) {
+  await poolPost('/pool/account', { site, id, enabled });
+}
+
+async function resetAccount(site, id) {
+  await poolPost('/pool/account', { site, id, reset: true });
+}
+
+async function renameAccount(site, id, old) {
+  const label = window.prompt('账号显示名：', old);
+  if (!label || !label.trim()) return;
+  await poolPost('/pool/account', { site, id, label: label.trim() });
+}
+
+async function removeAccount(site, id, label) {
+  if (!window.confirm(`确认删除账号「${label}」？\n（只删本机保存的凭证，不影响你的账号本身）`)) return;
+  await poolPost('/pool/account/remove', { site, id });
+}
+
+async function refreshPool(site) {
+  const r = await api('/pool?site=' + encodeURIComponent(site));
+  STATE.sites = STATE.sites.map((s) => (s.site === site ? { ...s, accounts: r.accounts } : s));
+  renderAccounts();
 }
 
 async function startLogin(site) {
   loginSite = site;
+  const label = window.prompt('给这个账号起个名字（可留空，用昵称）：', '') || null;
   let r;
   try {
-    r = await api('/login/start', { method: 'POST', body: { site } });
+    r = await api('/login/start', { method: 'POST', body: { site, label } });
   } catch (e) {
     // DeepSeek 官方站点没有设备授权流程，改用「粘贴 token」
     if (e.needToken) {
@@ -680,7 +775,8 @@ async function pollLogin() {
   try {
     const r = await api('/login/poll?site=' + encodeURIComponent(loginSite));
     if (r.done) {
-      $('loginMsg').innerHTML = `<span class="pill ok">登录成功</span> ${esc(r.uid || '')} ${esc(r.nickname || '')}`;
+      $('loginMsg').innerHTML = `<span class="pill ok">登录成功</span> ${esc(r.label || '')} ${esc(r.nickname || '')}` +
+        (r.account_count > 1 ? ` <span class="muted">（该站点现有 ${r.account_count} 个账号）</span>` : '');
       await loadState();
       renderAccounts();
       return;

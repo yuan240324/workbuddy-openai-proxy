@@ -154,6 +154,21 @@ export function defaultConfig() {
     },
     // 上游「连接级」失败的重试策略（国际版 codebuddy.ai 实测约有 17% 的连接抖动）
     upstreamRetry: { attempts: 3, backoffMs: [400, 1000] },
+    // 上下文压缩：输入超过模型上限时自动裁剪，避免客户端收到裸的
+    // "prompt is too long: N > M maximum"（实测 glm-5.1 上限 100000）
+    context: {
+      enabled: true,
+      reserveForOutput: 4096, // 给模型回复预留的 token
+      minKeepMessages: 4, // 至少保留最近 N 条消息（system 不计入）
+      safetyRatio: 0.95, // 按上限的 95% 算，给 token 估算误差留余量
+    },
+    // 账号池：同一站点下多个账号，额度耗尽或请求失败时自动换号
+    pool: {
+      // 单次请求最多尝试几个账号（含第一个）。调大更抗耗尽，但会拖慢失败请求。
+      maxAccountsPerRequest: 3,
+      // 本站点账号全耗尽时，是否降级到备用站点（该站点也有这个模型时）
+      switchSiteOnExhausted: true,
+    },
     models: DEFAULT_MODELS,
     modelAliases: {},
   };
@@ -309,6 +324,40 @@ export function validateConfig(cfg, defaults = defaultConfig()) {
       || cfg.upstreamRetry.backoffMs.some((v) => !Number.isFinite(v) || v < 0)) {
       fix('upstreamRetry.backoffMs 必须是非负数数组，已回退为默认值');
       cfg.upstreamRetry.backoffMs = [...defaults.upstreamRetry.backoffMs];
+    }
+  }
+
+  // ---- 上下文压缩 ----
+  if (!isPlainObject(cfg.context)) {
+    fix('context 必须是对象，已回退为默认值');
+    cfg.context = structuredClone(defaults.context);
+  } else {
+    if (typeof cfg.context.enabled !== 'boolean') cfg.context.enabled = defaults.context.enabled;
+    if (!Number.isInteger(cfg.context.reserveForOutput) || cfg.context.reserveForOutput < 0) {
+      fix(`context.reserveForOutput 必须是非负整数，已回退为 ${defaults.context.reserveForOutput}`);
+      cfg.context.reserveForOutput = defaults.context.reserveForOutput;
+    }
+    if (!Number.isInteger(cfg.context.minKeepMessages) || cfg.context.minKeepMessages < 0) {
+      fix(`context.minKeepMessages 必须是非负整数，已回退为 ${defaults.context.minKeepMessages}`);
+      cfg.context.minKeepMessages = defaults.context.minKeepMessages;
+    }
+    if (!Number.isFinite(cfg.context.safetyRatio) || cfg.context.safetyRatio <= 0 || cfg.context.safetyRatio > 1) {
+      fix(`context.safetyRatio 必须是 (0,1] 之间的小数，已回退为 ${defaults.context.safetyRatio}`);
+      cfg.context.safetyRatio = defaults.context.safetyRatio;
+    }
+  }
+
+  // ---- 账号池 ----
+  if (!isPlainObject(cfg.pool)) {
+    fix('pool 必须是对象，已回退为默认值');
+    cfg.pool = structuredClone(defaults.pool);
+  } else {
+    if (!Number.isInteger(cfg.pool.maxAccountsPerRequest) || cfg.pool.maxAccountsPerRequest <= 0) {
+      fix(`pool.maxAccountsPerRequest 必须是正整数，已回退为 ${defaults.pool.maxAccountsPerRequest}`);
+      cfg.pool.maxAccountsPerRequest = defaults.pool.maxAccountsPerRequest;
+    }
+    if (typeof cfg.pool.switchSiteOnExhausted !== 'boolean') {
+      cfg.pool.switchSiteOnExhausted = defaults.pool.switchSiteOnExhausted;
     }
   }
 

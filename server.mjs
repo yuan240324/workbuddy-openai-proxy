@@ -15,6 +15,7 @@ import { handleMessages, handleCountTokens } from './src/anthropic.mjs';
 import { queryCredit, supportsCreditQuery } from './src/upstream.mjs';
 import { handleConsoleApi } from './src/console-api.mjs';
 import { flushUsage } from './src/usage.mjs';
+import { flushPool } from './src/pool.mjs';
 import { readJsonBody, sendJson, sendError } from './src/util.mjs';
 import { log, warn, error } from './src/log.mjs';
 
@@ -389,6 +390,7 @@ server.listen(cfg.port, cfg.host, () => {
 process.on('SIGINT', () => {
   log('收到退出信号，正在保存用量统计并关闭服务');
   flushUsage();
+  flushPool();
   server.close(() => process.exit(0));
 });
 process.on('unhandledRejection', (e) => error('未处理的 Promise 异常：', e));

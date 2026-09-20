@@ -116,8 +116,10 @@ describe('refreshToken：成功路径', () => {
   test('刷新成功后写入新 token 并保留文件', async () => {
     mode = 'ok';
     writeAuth();
-    const tok = await authMod.ensureToken(cfg, 'cn-cli', { force: true });
-    assert.equal(tok, 'new-token');
+    // ensureToken 现在返回 { token, accountId }：号池需要知道用的是哪个账号
+    const r = await authMod.ensureToken(cfg, 'cn-cli', { force: true });
+    assert.equal(r.token, 'new-token');
+    assert.equal(r.accountId, 'default', '未建池时应回落到默认账号');
     assert.ok(authExists(), '凭证文件应保留');
     assert.equal(readAuth().accessToken, 'new-token');
   });
@@ -138,8 +140,8 @@ describe('refreshToken：成功路径', () => {
     }, null, 2));
     const t = Date.now() / 1000 + 1;
     fs.utimesSync(f, t, t);
-    const tok = await authMod.ensureToken(cfg, 'cn-cli');
-    assert.equal(tok, 'fresh');
+    const r = await authMod.ensureToken(cfg, 'cn-cli');
+    assert.equal(r.token, 'fresh');
   });
 });
 

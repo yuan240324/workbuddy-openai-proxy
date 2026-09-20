@@ -1,6 +1,7 @@
 // 设备授权登录（OAuth device flow）共享实现：CLI（login.mjs）与控制台 API 共用。
-// 只调用官方授权接口，把拿到的 token 写进本项目目录内的 auth.<site>.json。
-import { saveAuth, hydrateFromToken } from './auth.mjs';
+// 只调用官方授权接口，把拿到的 token 写进本项目目录内的账号池。
+import { hydrateFromToken } from './auth.mjs';
+import { addAccount } from './pool.mjs';
 import { commonHeaders } from './headers.mjs';
 
 const jars = new Map(); // site → Map(cookie)
@@ -52,7 +53,7 @@ export async function startLogin(cfg, site) {
 }
 
 /** 第二步：轮询一次授权结果。未完成时返回 { done:false, msg }。 */
-export async function pollLogin(cfg, site, state) {
+export async function pollLogin(cfg, site, state, { label = null } = {}) {
   const siteCfg = cfg.sites[site];
   const res = await api(cfg, site, 'GET', siteCfg.apiBase + '/v2/plugin/auth/token?state=' + encodeURIComponent(state));
   const data = res.json?.data;
@@ -82,6 +83,8 @@ export async function pollLogin(cfg, site, state) {
     /* 账号信息拿不到不影响登录 */
   }
   hydrateFromToken(site, auth);
-  const saved = saveAuth(site, auth);
+  // 加进号池：同一 uid 会覆盖更新，不同 uid 则新增一个账号。
+  // 首个账号加入时会自动把旧的单账号凭证并进池（用户无感迁移）。
+  const saved = addAccount(site, auth, { label });
   return { done: true, auth: saved };
 }

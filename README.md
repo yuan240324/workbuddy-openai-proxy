@@ -31,7 +31,7 @@ workbuddy-openai-proxy/
 ├── server.mjs            # 服务入口（路由 + 鉴权 + 路径后缀容错 + 控制台挂载）
 ├── console-open.mjs      # 打开控制台窗口（服务没启动会自动拉起）
 ├── console-open.vbs      # 隐藏窗口调用上面那个（桌面快捷方式用）
-├── login.mjs             # 设备授权登录（--site 选站点），凭证写入 auth.<站点>.json
+├── login.mjs             # 设备授权登录（--site 选站点 / --label 命名账号 / --list 看号池）
 ├── status.mjs            # 查看各站点登录状态 + 剩余积分
 ├── ask.mjs               # 命令行提问客户端（验证代理是否正常）
 ├── stop.mjs              # 通过 /admin/shutdown 优雅停止服务
@@ -49,6 +49,8 @@ workbuddy-openai-proxy/
 └── src/
     ├── config.mjs        # 配置加载 + 校验降级 + 站点表（国内版 / 国际版）
     ├── auth.mjs          # 多站点凭证存取 + 自动刷新（单飞）+ 运行中热加载
+    ├── pool.mjs          # 账号池：选号 / 额度耗尽标记 / 失败退避 / 轮询分摊
+    ├── compress.mjs      # 上下文压缩：超长裁剪 + 中文感知 token 估算
     ├── device-login.mjs  # 设备授权登录（CLI 与控制台共用）
     ├── headers.mjs       # 站点感知的上游请求头
     ├── upstream.mjs      # 上游聊天/模型/额度接口 + SSE 解析
@@ -62,8 +64,8 @@ workbuddy-openai-proxy/
 ```
 
 运行时自动生成、**已被 .gitignore 忽略**的文件：`config.json`（含本地 API Key）、
-`auth.<站点>.json`（各站点登录凭证，如 `auth.cn-cli.json`）、`usage.json`（用量统计）、
-`.login-state.json`、`server.log` / `console.log`。
+`auth.<站点>.json`（各站点登录凭证，如 `auth.cn-cli.json`）、`auth.<站点>.pool.json`（账号池）、
+`usage.json`（用量统计）、`.login-state.json`、`server.log` / `console.log`。
 
 启动后会打印每个站点的登录状态：
 
@@ -277,7 +279,72 @@ node login.mjs --site intl-work     # 国际版 WorkBuddy（workbuddy.ai）
    `config.json` 的 `defaultSystemPrompt` 里改），客户端无感。
 2. **目录接口不可用**：见上，用内置清单兜底；`GET /v1/models` 仍会展示这些模型。
 
-### 5.2 请求怎么路由到站点
+### 5.2 账号池（同一站点多个账号）
+
+一个站点下可以放多个账号。当某个账号**额度耗尽**或**请求失败**时，自动换下一个账号重试。
+
+#### 加账号
+
+再登录一次即可，同一个 uid 覆盖更新，不同 uid 自动新增：
+
+```powershell
+node login.mjs --site intl-cli --label 小号A     # --label 只是显示名，可留空用昵称
+node login.mjs --site intl-cli --label 小号B
+node login.mjs --site intl-cli --label 小号C
+
+node login.mjs --list                            # 看各站点号池现状
+```
+
+#### 怎么选号
+
+按优先级依次比较：
+
+1. **没被判额度耗尽**的优先（耗尽后 6 小时自动重试，因为额度可能已重置）
+2. **连续失败次数少**的优先
+3. **最久没被用过**的优先 → 负载自动摊开，不会一直薅同一个号
+
+所以正常情况是多个号轮流用；只有在某个号出问题时才会被暂时跳过。
+
+#### 什么时候换号
+
+| 情况 | 处理 |
+|---|---|
+| **额度耗尽**（429 / insufficient credits / 积分不足） | 标记该号耗尽，换下一个，6 小时后重新尝试 |
+| **401 / 403** | 先原地强刷该号 token（可能只是过期），仍失败才换号 |
+| **5xx / 网关故障** | 退避冷却（30秒 → 2分 → 10分 → 30分），换下一个 |
+| **本站点账号全部耗尽** | 若备用站点也有该模型，自动降级过去（`pool.switchSiteOnExhausted`） |
+
+单次请求最多试几个号由 `pool.maxAccountsPerRequest` 控制（默认 3）。
+
+#### 控制台管理
+
+控制台「账号登录」页每个站点是一张卡片，列出该站点所有账号：
+
+- 每个号显示：状态（可用 / 额度耗尽 / 冷却中 / 已禁用）、uid、**余额**、token 到期、连续失败次数、最近错误
+- 可操作：**改名** / **禁用** / **启用** / **重置状态** / **删除** / **添加账号** / **刷新余额**
+
+#### 配置文件
+
+```jsonc
+{
+  "pool": {
+    "maxAccountsPerRequest": 3,      // 单次请求最多尝试几个账号
+    "switchSiteOnExhausted": true    // 本站点账号全耗尽时是否降级到备用站点
+  }
+}
+```
+
+#### 存储与兼容
+
+- 账号池落在 `auth.<site>.pool.json`（权限 600），**仅本项目目录内**
+- **无需迁移**：池文件不存在时，旧的 `auth.<site>.json` 会被当作唯一账号，
+  行为与以前完全一致；加了第二个号（或第一次改动）才写成池文件
+- 首次加号时，旧账号会自动并进池，不会丢
+- 删除「默认账号」时连带清掉旧凭证文件，避免它又被兼容逻辑读回来
+
+> ⚠️ **别把同一个账号登录两次**：同一 uid 会被识别为覆盖更新，不会产生两条记录。
+
+### 5.3 请求怎么路由到站点
 
 优先级从高到低：
 
@@ -288,7 +355,7 @@ node login.mjs --site intl-work     # 国际版 WorkBuddy（workbuddy.ai）
 
 所以日常直接写模型 ID 就行；需要跨站点区分同名模型时用前缀或 `modelRoutes`。
 
-### 5.3 查看站点状态与倍率
+### 5.4 查看站点状态与倍率
 
 ```powershell
 status.cmd                       # 各站点登录态 + 剩余积分
@@ -303,7 +370,67 @@ node status.mjs --site intl-cli  # 只看某个站点
 
 ---
 
-## 6. 常见问题
+## 6. 上下文压缩（长会话不再 400）
+
+上游对输入长度有硬限制，超了直接返回：
+
+```json
+{"code":11115,"msg":"prompt is too long: 100001 tokens > 100000 maximum"}
+```
+
+以前反代是**原样转发**，什么也不做 —— 所以长会话（尤其带大量文件内容的编码助手场景）
+必然撞这个墙，客户端只能看到一个裸的 400。现在会自动压缩。
+
+### 怎么压
+
+1. 请求进来先按模型的上下文上限裁剪（上限取自站点目录的 `maxInputTokens`）
+2. 万一还是被上游拒（说明目录里的值不准），**自动压缩后重试**，最多 3 次，每次收缩一档
+
+### 裁剪规则
+
+| 规则 | 原因 |
+|---|---|
+| `system` 提示永远保留 | 丢了会改变模型行为 |
+| 从**最老**的消息开始丢 | 越新的对话越重要 |
+| 至少保留最近 4 条 | 保证当前这轮对话完整 |
+| `tool_calls` 与其 `tool` 结果**同生共死** | 只删一半，上游会报 tool_call_id 找不到 |
+| 单条自己就超限时，截断它自己的内容（留头尾 + 标记） | 例如一条超大的文件内容 |
+
+压缩后日志会有明确记录，控制台「日志」页能看到：
+
+```
+[warn] [cn-cli] glm-5.1 上下文超限，已自动压缩：丢弃 83 条、截断 0 条，1100810 → 187157 tokens（上限 200000）
+```
+
+### 配置
+
+```jsonc
+{
+  "context": {
+    "enabled": true,          // 关掉就恢复「原样转发」
+    "reserveForOutput": 4096, // 给模型回复预留的 token
+    "minKeepMessages": 4,     // 至少保留最近几条（不含 system）
+    "safetyRatio": 0.95       // 按上限的 95% 算，给估算误差留余量
+  }
+}
+```
+
+### 附带修掉的两个坑
+
+**token 估算低估中文 1.6 倍**。原来沿用 `estimateTokens` 的「3 字符 ≈ 1 token」（英文口径），
+实测中文是 **0.528 tokens/字符** —— 按 0.33 估就会「以为装得下、其实装不下」，压缩根本不触发。
+现在按内容类型分别计权（中文 0.55 / 数字 0.33 / 其他 0.25），中文误差降到 4%。
+
+**上游报错里的数字不可信**。「too long: 100001 > 100000」里的 `100000` 看着像模型上限，
+但实测同一个模型 34 万字符（180030 tokens）明明能正常返回 200 —— 真正触发 400 的是请求体积，
+报错信息是误导性的。所以那个数字**只当信号用，不当上限**，压缩走「相对收缩 + 重试」逼近。
+
+> 顺便：上游返回的 JSON 里 `>` 是转义成 `\u003e` 的。正则直接匹配字面 `>` 会静默失败，
+> 导致「压缩逻辑写了却完全不触发」。这个坑踩过，已在 `parseLimitFromError` 里处理。
+
+---
+
+## 7. 常见问题
 
 | 现象 | 处理 |
 |---|---|
@@ -329,7 +456,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 
 ---
 
-## 7. 示例模型清单
+## 8. 示例模型清单
 
 > 各账号可用模型不同（取决于套餐/权限），**实际清单以 `GET /v1/models` 实时返回为准**。下表仅为一个普通账号的示例：
 
@@ -357,7 +484,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 
 ---
 
-## 8. 接口一览
+## 9. 接口一览
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
@@ -373,7 +500,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 
 ---
 
-## 9. 已验证项（Windows + Node 24 实测）
+## 10. 已验证项（Windows + Node 24 实测）
 
 - ✅ 设备授权登录、`refresh_token` 自动续期（accessToken 临期 5 分钟内自动刷新，遇 401 强刷重试一次）
 - ✅ 国内版 / 国际版多站点：站点表、独立凭证、`站点/模型` 前缀路由、目录匹配自动选站点
@@ -389,7 +516,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 
 ---
 
-## 10. 测试
+## 11. 测试
 
 零依赖，用 Node 内置的 `node:test`，**不需要 npm install**（Node ≥ 18）。
 
@@ -397,7 +524,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 npm test              # 或：node --test --experimental-test-isolation=none "test/**/*.test.mjs"
 ```
 
-覆盖范围（298 个用例）：
+覆盖范围（363 个用例）：
 
 | 测试文件 | 覆盖内容 |
 |---|---|
@@ -407,6 +534,8 @@ npm test              # 或：node --test --experimental-test-isolation=none "te
 | `anthropic.test.mjs` | Anthropic ↔ OpenAI 双向转换、tool_result 顺序约束 |
 | `router.test.mjs` / `router.resolve.test.mjs` | 倍率解析、模型→站点路由优先级 |
 | `auth.test.mjs` | 凭证刷新、失效清除与临时故障的区分、JWT 解析、并发单飞 |
+| `pool.test.mjs` | 账号池：选号、额度耗尽、失败退避、旧单账号兼容、`getAuth` 跟随池 |
+| `compress.test.mjs` | 上下文压缩：分块不可拆、system 保留、截断、上限解析（含转义 `\u003e`） |
 | `timeout.test.mjs` | 上游挂起时必须超时返回（含响应体阶段） |
 | `paths.test.mjs` | 路径段匹配与 TraeWork 拼接容错 |
 | `usage.test.mjs` | 用量统计、余额采样节流 |
@@ -421,7 +550,7 @@ npm test              # 或：node --test --experimental-test-isolation=none "te
 
 ---
 
-## 11. 安全与合规
+## 12. 安全与合规
 
 - 仅监听 `127.0.0.1`；`auth.<站点>.json` 权限 0600，**不要外传**、不要提交仓库（`.gitignore` 已忽略）。
 - 走的是 **CodeBuddy 官方 CLI 所用的非公开接口**，无官方文档、可能随时变更；本项目只做本机自用转发。
@@ -444,7 +573,7 @@ npm test              # 或：node --test --experimental-test-isolation=none "te
 
 ---
 
-## 12. 致谢
+## 13. 致谢
 
 上游协议细节参考了以下开源项目的公开实现（本项目代码为独立重写，仅借鉴接口形态与字段约定）：
 
@@ -459,7 +588,7 @@ Trae / TraeWork / CodeBuddy / WorkBuddy 均为其各自所有者的商标，本�
 
 ---
 
-## 13. 许可证
+## 14. 许可证
 
 [MIT](LICENSE)
 

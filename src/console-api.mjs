@@ -2,7 +2,16 @@
 // 仅本机可用（服务只监听 127.0.0.1），鉴权用控制台会话 token 或 config.json 的 apiKey。
 import fs from 'node:fs';
 import { siteKeys, saveConfig, paths, authPathFor } from './config.mjs';
-import { getAuth, isLoggedIn } from './auth.mjs';
+import { getAuth, isLoggedIn, accountSnapshot } from './auth.mjs';
+import {
+  poolPathFor,
+  getAccount,
+  removeAccount,
+  setAccountEnabled,
+  setAccountLabel,
+  resetAccountState,
+  markExhausted,
+} from './pool.mjs';
 import { getCatalog, mergedModels, parseMultiplier } from './router.mjs';
 import { openChat, queryCredit, classifyFrame, upstreamErrorMessage, supportsCreditQuery } from './upstream.mjs';
 import { startLogin, pollLogin } from './device-login.mjs';
@@ -22,6 +31,7 @@ async function siteSummary(cfg, site) {
   const a = getAuth(site);
   const s = cfg.sites[site];
   const cat = await getCatalog(cfg, site);
+  const accounts = accountSnapshot(site);
   return {
     site,
     label: s.label,
@@ -35,6 +45,10 @@ async function siteSummary(cfg, site) {
     model_count: cat.models.size,
     catalog_source: cat.source || null,
     catalog_error: cat.error || null,
+    // 号池概览：控制台据此显示「3 个账号，2 个可用」
+    account_count: accounts.length,
+    account_usable: accounts.filter((x) => x.usable).length,
+    accounts,
   };
 }
 
@@ -171,6 +185,55 @@ export async function handleConsoleApi(ctx) {
     return sendJson(res, 200, { ok: true, aliases: cfg.modelAliases });
   }
 
+  // ---- 号池：列出某站点所有账号（含各自余额） ----
+  if (p === '/pool' && method === 'GET') {
+    const site = String(url.searchParams.get('site') || cfg.defaultSite);
+    if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
+    const withCredit = url.searchParams.get('credit') !== '0';
+    const accounts = accountSnapshot(site);
+    if (withCredit && supportsCreditQuery(cfg, site)) {
+      // 逐个查余额。串行执行——并发打上游容易被限流。
+      for (const a of accounts) {
+        if (!a.enabled) continue;
+        try {
+          const c = await queryCredit(cfg, site, a.id);
+          a.credit = c.remain;
+          a.credit_detail = c.detail;
+          if (typeof c.remain === 'number') recordBalance(`${site}/${a.label}`, c.remain);
+          // 余额为 0 且活动仍开启 → 直接标记耗尽，下次请求就会跳过它
+          if (c.remain <= 0) markExhausted(site, a.id, '余额为 0');
+        } catch (e) {
+          a.credit_error = e.message.slice(0, 160);
+        }
+      }
+    }
+    return sendJson(res, 200, { site, accounts, supports_credit: supportsCreditQuery(cfg, site) });
+  }
+
+  // ---- 号池：启用/禁用、重置状态、删除、改标签 ----
+  if (p === '/pool/account' && method === 'POST') {
+    const body = ctx.body || {};
+    const site = String(body.site || cfg.defaultSite);
+    const id = String(body.id || '');
+    if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
+    if (!getAccount(site, id)) return sendJson(res, 404, { error: `账号不存在：${id}` });
+
+    if (typeof body.enabled === 'boolean') setAccountEnabled(site, id, body.enabled);
+    if (body.reset) resetAccountState(site, id);
+    if (typeof body.label === 'string' && body.label.trim()) setAccountLabel(site, id, body.label.trim());
+    return sendJson(res, 200, { ok: true, account: accountSnapshot(site).find((a) => a.id === id) || null });
+  }
+
+  if (p === '/pool/account/remove' && method === 'POST') {
+    const body = ctx.body || {};
+    const site = String(body.site || cfg.defaultSite);
+    const id = String(body.id || '');
+    if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
+    const ok = removeAccount(site, id);
+    if (!ok) return sendJson(res, 404, { error: `账号不存在：${id}` });
+    return sendJson(res, 200, { ok: true, remaining: accountSnapshot(site).length });
+  }
+
   // ---- 日志 ----
   if (p === '/logs' && method === 'GET') {
     const after = Number(url.searchParams.get('after') || 0);
@@ -208,7 +271,7 @@ export async function handleConsoleApi(ctx) {
     const site = String(body.site || cfg.defaultSite);
     if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
     const r = await startLogin(cfg, site);
-    loginStates.set(site, r);
+    loginStates.set(site, { ...r, label: body.label ? String(body.label).slice(0, 40) : null });
     return sendJson(res, 200, r);
   }
 
@@ -216,25 +279,45 @@ export async function handleConsoleApi(ctx) {
     const site = String(url.searchParams.get('site') || cfg.defaultSite);
     const st = loginStates.get(site);
     if (!st) return sendJson(res, 400, { error: '请先点击「开始登录」' });
-    const r = await pollLogin(cfg, site, st.state);
+    const r = await pollLogin(cfg, site, st.state, { label: st.label || null });
     if (r.done) {
       loginStates.delete(site);
-      return sendJson(res, 200, { done: true, uid: r.auth.uid, nickname: r.auth.nickname, expires_at: r.auth.expiresAt });
+      return sendJson(res, 200, {
+        done: true,
+        account_id: r.auth.id,
+        label: r.auth.label,
+        uid: r.auth.uid,
+        nickname: r.auth.nickname,
+        expires_at: r.auth.expiresAt,
+        account_count: accountSnapshot(site).length,
+      });
     }
     return sendJson(res, 200, { done: false, msg: r.msg });
   }
+
+  /**
+   * 登出。带 id 时只删该账号；不带 id 时——为兼容旧行为——删掉该站点账号池，
+   * 但保留账号记录（置为未登录）会更让人困惑，所以这里明确按「删账号」处理。
+   */
   if (p === '/login/logout' && method === 'POST') {
     const body = ctx.body || {};
     const site = String(body.site || '');
     if (!cfg.sites[site]) return sendJson(res, 400, { error: `未知站点 ${site}` });
-    // 只清空本项目内的凭证文件，不动客户端
+    const id = body.id ? String(body.id) : null;
+    if (id) {
+      if (!getAccount(site, id)) return sendJson(res, 404, { error: `账号不存在：${id}` });
+      removeAccount(site, id);
+      return sendJson(res, 200, { ok: true, site, removed: id, remaining: accountSnapshot(site).length });
+    }
+    // 没指定账号 → 清空整个站点（旧版语义）
     try {
+      fs.rmSync(poolPathFor(site), { force: true });
       fs.rmSync(authPathFor(site), { force: true });
       if (site === 'cn-cli') fs.rmSync(paths.legacyAuth, { force: true });
     } catch (e) {
       return sendJson(res, 500, { error: e.message });
     }
-    return sendJson(res, 200, { ok: true, site });
+    return sendJson(res, 200, { ok: true, site, remaining: 0 });
   }
 
   // ---- 服务控制 ----

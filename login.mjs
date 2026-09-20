@@ -1,25 +1,51 @@
-// 设备授权登录（OAuth device flow，多站点）：不读取 WorkBuddy 客户端任何本地文件，
-// 只把浏览器授权后拿到的 token 写入本项目的 auth.<site>.json。
+// 设备授权登录（OAuth device flow，多站点 + 多账号）：不读取 WorkBuddy 客户端任何本地文件，
+// 只把浏览器授权后拿到的 token 写进本项目的账号池。
 //
-//   node login.mjs                           登录默认站点（cn-cli）
+//   node login.mjs                           登录默认站点（cn-cli），结果加进该站点号池
 //   node login.mjs --site intl-cli           登录国际版 CLI（codebuddy.ai）
 //   node login.mjs --site intl-work          登录国际版 WorkBuddy（workbuddy.ai）
+//   node login.mjs --label 小号A             给这次加的账号起个名字（方便在控制台区分）
 //   node login.mjs --site cn-cli --no-open   只打印授权链接，不自动打开浏览器
-//   node login.mjs --site intl-cli 1800      自定义等待秒数（默认 600）
+//   node login.mjs --list                    列出各站点号池里的账号
+//
+// 换账号只要再登录一次：同一个 uid 会覆盖更新，不同 uid 自动新增一条。
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import { loadConfig, paths, authPathFor, siteKeys } from './src/config.mjs';
+import { loadConfig, paths, siteKeys } from './src/config.mjs';
 import { jwtClaims } from './src/auth.mjs';
+import { accountSnapshot } from './src/auth.mjs';
 import { startLogin, pollLogin } from './src/device-login.mjs';
+import { poolPathFor } from './src/pool.mjs';
 import { log, warn } from './src/log.mjs';
 
 const cfg = loadConfig();
 const args = process.argv.slice(2);
 const siteIdx = args.indexOf('--site');
 const siteKey = siteIdx >= 0 ? args[siteIdx + 1] : cfg.defaultSite;
+const labelIdx = args.indexOf('--label');
+const label = labelIdx >= 0 ? args[labelIdx + 1] : null;
 const autoOpen = !args.includes('--no-open');
+const listOnly = args.includes('--list');
 const timeoutSec = Number(args.find((a) => /^\d+$/.test(a)) || 600);
 const POLL_MS = 3000;
+
+/** --list：不登录，只把各站点号池现状打出来。 */
+if (listOnly) {
+  for (const s of siteKeys(cfg)) {
+    const list = accountSnapshot(s);
+    console.log(`\n[${s}] ${cfg.sites[s].label} —— ${list.length} 个账号`);
+    if (!list.length) {
+      console.log('  （空。运行 node login.mjs --site ' + s + ' 添加账号）');
+      continue;
+    }
+    for (const a of list) {
+      const 状态 = !a.enabled ? '已禁用' : a.exhausted ? '额度耗尽' : a.usable ? '可用' : '冷却中';
+      console.log(`  · ${a.label}  uid=${String(a.uid || '').slice(0, 8)}…  ${状态}${a.last_error ? '  ← ' + a.last_error.slice(0, 40) : ''}`);
+    }
+  }
+  console.log(`\n号池文件：${poolPathFor(cfg.defaultSite)}（每站点一个）`);
+  process.exit(0);
+}
 
 if (!cfg.sites?.[siteKey]) {
   console.error(`未知站点：${siteKey}\n可用站点：${siteKeys(cfg).join(', ')}`);
@@ -71,7 +97,7 @@ async function main() {
   let lastMsg = '';
   while (Date.now() < deadline) {
     await sleep(POLL_MS);
-    const r = await pollLogin(cfg, siteKey, state);
+    const r = await pollLogin(cfg, siteKey, state, { label });
     if (r.done) {
       try {
         fs.unlinkSync(paths.loginState);
@@ -80,13 +106,16 @@ async function main() {
       }
       const saved = r.auth;
       const claims = jwtClaims(saved.accessToken) || {};
+      const 池 = accountSnapshot(siteKey);
       console.log('');
       log(`登录成功 ✅  （站点 ${siteKey}）`);
+      log(`  账号：${saved.label || saved.nickname || saved.id}`);
       log(`  uid：${saved.uid || claims.sub || '未知'}`);
       log(`  昵称：${saved.nickname || '未知'}`);
       log(`  企业/域：${saved.enterpriseId || '未知'} / ${saved.domain || '未知'}`);
       log(`  token 过期时间：${saved.expiresAt ? new Date(saved.expiresAt).toLocaleString() : '未知'}`);
-      log(`  凭证已写入：${authPathFor(siteKey)}`);
+      log(`  已写入号池：${poolPathFor(siteKey)}`);
+      log(`  该站点现有 ${池.length} 个账号：${池.map((a) => a.label).join('、')}`);
       return;
     }
     const msg = r.msg || '';

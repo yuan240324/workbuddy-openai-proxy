@@ -3,6 +3,7 @@
 import { siteKeys } from './config.mjs';
 import { isLoggedIn } from './auth.mjs';
 import { fetchModels } from './upstream.mjs';
+import { learnLimit } from './compress.mjs';
 
 const TTL_OK = 5 * 60 * 1000;
 const TTL_ERR = 60 * 1000;
@@ -71,8 +72,15 @@ export async function getCatalog(cfg, site, { force = false } = {}) {
   }
   const 过滤 = (list) =>
     new Map(list.filter((m) => !isExcluded(cfg, site, m.id)).map((m) => [m.id, m]));
+  /** 目录里带 maxInputTokens 的模型，顺手登记进「上下文上限」表供压缩用。 */
+  const 登记上限 = (list) => {
+    for (const m of list) {
+      if (m?.id && m.contextWindow) learnLimit(site, m.id, m.contextWindow);
+    }
+  };
   try {
     const list = await fetchModels(cfg, site);
+    登记上限(list);
     const entry = { at: Date.now(), ttl: TTL_OK, models: 过滤(list), error: null, source: 'upstream' };
     catalogs.set(site, entry);
     return entry;
@@ -86,6 +94,7 @@ export async function getCatalog(cfg, site, { force = false } = {}) {
     }
     // 动态目录不可用（如国际版控制台接口被网关限制）→ 用站点内置清单兜底
     const seed = cfg.sites[site]?.seedModels || [];
+    登记上限(seed);
     const models = 过滤(seed.map((m) => ({ ...m, seed: true })));
     const entry = {
       at: Date.now(),
@@ -146,8 +155,25 @@ async function computeFallback(cfg, 首选站点, 目标模型) {
   return 备选.length ? { site: 备选[0].site, model: 目标模型 } : null;
 }
 
-/** 解析请求里的模型 → { site, model, requested, fallback? }。 */
+/**
+ * 解析请求里的模型 → { site, model, requested, fallback? }。
+ *
+ * 外层包一层「确保目标站点的目录已加载」：目录里带 maxInputTokens，
+ * 加载时会登记进压缩模块的上限表。少了这一步，走显式前缀（`cn-cli/xxx`）
+ * 的请求可能整条路径都不碰目录，压缩就因为没有上限而完全不触发
+ * —— 表现为长上下文照样吃 400。
+ */
 export async function resolveTarget(cfg, requestedModel) {
+  const target = await resolveTargetInner(cfg, requestedModel);
+  try {
+    await getCatalog(cfg, target.site);
+  } catch {
+    /* 目录拿不到不影响主流程，压缩会退化成「按比例收缩」 */
+  }
+  return target;
+}
+
+async function resolveTargetInner(cfg, requestedModel) {
   let raw = String(requestedModel || '').trim();
   const sites = siteKeys(cfg);
   if (!raw) raw = cfg.defaultModel;

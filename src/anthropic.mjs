@@ -1,7 +1,6 @@
 // Anthropic 兼容路由：/v1/messages、/v1/messages/count_tokens
 // Trae 的「Claude 型自定义模型」走 Anthropic Messages 协议，这里做双向转换。
-import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
-import { ensureToken } from './auth.mjs';
+import { openChat, openChatRotating, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { resolveTarget } from './router.mjs';
 import { isModelNotFound, isTransportFailure, isGatewayError } from './openai.mjs';
 import { recordUsage } from './usage.mjs';
@@ -130,20 +129,8 @@ export async function handleMessages(ctx) {
   const openaiBody = toOpenAIBody({ ...body, model });
   if (openaiBody.max_tokens === undefined) openaiBody.max_tokens = cfg.defaultMaxTokens;
 
-  // 请求上游（含 401 刷新重试）；连接级失败时降级到备用站点
-  const 打开一次 = async () => {
-    let u = await openChat(cfg, site, openaiBody, { signal });
-    if (!u.ok && u.status === 401) {
-      warn(`[${site}] 上游 401，强制刷新 token 后重试一次`);
-      try {
-        await ensureToken(cfg, site, { force: true });
-      } catch (e) {
-        warn(`[${site}] 刷新 token 失败：`, e.message);
-      }
-      u = await openChat(cfg, site, openaiBody, { signal });
-    }
-    return u;
-  };
+  // 请求上游（openChatRotating 内部处理 401 刷 token 与换号）；连接级失败时降级到备用站点
+  const 打开一次 = async () => openChatRotating(cfg, site, openaiBody, { signal }).then((r) => r.up);
 
   let up;
   try {

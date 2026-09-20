@@ -1,6 +1,6 @@
 // OpenAI 兼容路由：/v1/models、/v1/chat/completions（流式 + 非流式，支持工具调用）
 // 多站点：请求里的 model 可写裸 ID（自动选站点），也可写 `站点/模型` 显式指定。
-import { openChat, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
+import { openChat, openChatRotating, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
 import { resolveTarget, mergedModels, parseMultiplier, isExcluded } from './router.mjs';
 import { recordUsage } from './usage.mjs';
@@ -33,19 +33,13 @@ export function normalizeChunk(obj, publicModel) {
   return out;
 }
 
-/** 发起上游请求，遇 401 自动强刷该站点 token 重试一次。 */
-async function openWithRetry(cfg, site, body, signal) {
-  let up = await openChat(cfg, site, body, { signal });
-  if (!up.ok && up.status === 401) {
-    warn(`[${site}] 上游 401，强制刷新 token 后重试一次`);
-    try {
-      await ensureToken(cfg, site, { force: true });
-    } catch (e) {
-      warn(`[${site}] 刷新 token 失败：`, e.message);
-    }
-    up = await openChat(cfg, site, body, { signal });
-  }
-  return up;
+/**
+ * 发起上游请求（含账号轮换）。账号层面的处理全在 openChatRotating 里：
+ * 401 先原地刷 token，仍失败则换号；这里只负责把结果交给上层做站点降级。
+ */
+async function openWithRetry(cfg, site, body, signal, opts = {}) {
+  const r = await openChatRotating(cfg, site, body, { signal, ...opts });
+  return r.up;
 }
 
 /** 判断上游错误是否为「该站点没有这个模型」，据此触发站点降级。 */
@@ -67,11 +61,12 @@ export function isGatewayError(status) {
   return status === 502 || status === 503 || status === 504;
 }
 
-/** 换个站点重试同一请求（用于降级）。 */
+/** 换个站点重试同一请求（用于降级）。换站点后账号池也换了一套，因此 exclude 重置。 */
 async function openWithFallback(cfg, target, upstreamBody, signal, 原因) {
   warn(`[${target.site}] ${原因}，自动降级到备用站点 ${target.fallback.site} 重试`);
   upstreamBody.model = target.fallback.model;
-  return { up: await openWithRetry(cfg, target.fallback.site, upstreamBody, signal), site: target.fallback.site, model: target.fallback.model };
+  const r = await openWithRetry(cfg, target.fallback.site, upstreamBody, signal);
+  return { up: r.up, site: target.fallback.site, model: target.fallback.model };
 }
 
 export async function handleChatCompletions(ctx) {
@@ -97,6 +92,12 @@ export async function handleChatCompletions(ctx) {
     // 连接级失败（国际版网络抖动）→ 换站点重试一次
     if (target.fallback && isTransportFailure(e) && !signal?.aborted) {
       const r = await openWithFallback(cfg, target, upstreamBody, signal, `连接失败（${e?.cause?.code || e?.message}）`);
+      up = r.up;
+      site = r.site;
+      model = r.model;
+    } else if (cfg.pool?.switchSiteOnExhausted && target.fallback && !signal?.aborted) {
+      // 本站点所有账号都被判额度耗尽 → 换到还有额度的备用站点
+      const r = await openWithFallback(cfg, target, upstreamBody, signal, '本站点账号额度不足');
       up = r.up;
       site = r.site;
       model = r.model;
