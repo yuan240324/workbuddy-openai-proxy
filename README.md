@@ -20,7 +20,22 @@
 > 理论上 Windows / macOS / Linux 都能跑；但**目前只在 Windows + Node 24 上实测过**，
 > 其他平台欢迎反馈（见 §12 的已知边界）。
 
-<!-- 演示 GIF 放这里：docs/demo.gif（< 2MB），见「如何录制演示」 -->
+<!-- 演示 GIF 待补：录好后放 docs/demo.gif，替换下面的静态截图 -->
+
+### 看一眼
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshot-terminal.png" alt="一行命令启动"><br>
+<sub><b>一行启动</b> — 没有 npm install，没有 node_modules</sub></td>
+<td width="50%"><img src="docs/screenshot-console.png" alt="网页控制台"><br>
+<sub><b>网页控制台</b> — 站点状态、额度、账号池、日志</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screenshot-models.png" alt="模型与积分倍率"><br>
+<sub><b>模型清单</b> — 自动合并各站点，带积分倍率与上下文窗口，可一键切默认模型</sub></td>
+</tr>
+</table>
 
 ---
 

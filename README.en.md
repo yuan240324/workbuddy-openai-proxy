@@ -15,7 +15,94 @@ Covers **both editions**: China (`copilot.tencent.com`) and International
 ![Platform](https://img.shields.io/badge/tested%20on-Windows%20%C2%B7%20Node%2024-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-<!-- Demo GIF goes here: docs/demo.gif (< 2MB) -->
+<!-- Demo GIF pending: drop it at docs/demo.gif and replace the stills below -->
+
+### A look at it
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshot-terminal.png" alt="one-line startup"><br>
+<sub><b>One-line startup</b> — no npm install, no node_modules</sub></td>
+<td width="50%"><img src="docs/screenshot-console.png" alt="web console"><br>
+<sub><b>Web console</b> — sites, quota, account pool, live logs</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screenshot-models.png" alt="models and credit multipliers"><br>
+<sub><b>Model list</b> — merged across sites, with credit multiplier and context window</sub></td>
+</tr>
+</table>
+
+---
+
+## Overview
+
+This is a **local HTTP proxy** that sits between your editor/tool and Tencent's CodeBuddy
+service. It speaks the two protocols your tools already understand (OpenAI and Anthropic),
+translates them into CodeBuddy's own private API, and forwards them using your existing
+account.
+
+```
+┌─────────────────┐   OpenAI / Anthropic    ┌──────────────┐   CodeBuddy private API   ┌──────────────┐
+│  Cursor         │   (what tools speak)    │   this proxy │   (what the service uses) │  CodeBuddy   │
+│  Claude Code    │ ──────────────────────▶ │              │ ────────────────────────▶ │  cn / intl   │
+│  Codex CLI      │ ◀────────────────────── │ 127.0.0.1    │ ◀──────────────────────── │              │
+│  Cherry Studio  │      SSE streaming      │   :8788      │        SSE streaming      │              │
+└─────────────────┘                         └──────────────┘                           └──────────────┘
+```
+
+**The problem it solves:** your CodeBuddy subscription gives you model quota, but that quota is
+only reachable through Tencent's own clients. Your editor has no idea it exists. This proxy
+exposes it as a standard API endpoint, so any tool that accepts a custom OpenAI/Anthropic base
+URL can use your quota.
+
+**What it is not:** it is not a key-sharing service, not a hosted API, and it does not create
+accounts for you. It relays requests from *your* machine using *your* login, and stays on
+loopback.
+
+### What's in the box
+
+```
+workbuddy-openai-proxy/
+├── server.mjs            # entry point (routing + auth + console mount)
+├── login.mjs             # OAuth device-flow login (--site / --label / --list)
+├── status.mjs            # per-site login state + remaining quota
+├── ask.mjs               # one-shot CLI client, for verifying the proxy works
+├── stop.mjs              # graceful shutdown via /admin/shutdown
+├── console/index.html    # web console (single file, zero deps, light/dark themes)
+└── src/
+    ├── config.mjs        # config loading + validation with safe fallback
+    ├── auth.mjs          # credential store, auto-refresh (single-flight), account selection
+    ├── pool.mjs          # account pool: selection, exhaustion marking, backoff
+    ├── compress.mjs      # context compression + token estimation
+    ├── device-login.mjs  # OAuth device flow (shared by CLI and console)
+    ├── headers.mjs       # site-aware upstream request headers
+    ├── upstream.mjs      # upstream chat/models/quota + SSE parsing
+    ├── router.mjs        # model → site routing
+    ├── openai.mjs        # /v1/models, /v1/chat/completions
+    ├── anthropic.mjs     # /v1/messages, /v1/messages/count_tokens
+    ├── responses.mjs     # /v1/responses (Codex CLI)
+    ├── console-api.mjs   # console backend
+    ├── usage.mjs         # usage stats (per day / site / model)
+    ├── util.mjs          # HTTP/SSE helpers
+    └── log.mjs           # logging with in-memory ring buffer
+```
+
+Files created at runtime and **gitignored**: `config.json` (holds your local API key),
+`auth.<site>.json` / `auth.<site>.pool.json` (credentials — **never commit these**),
+`usage.json`, `.login-state.json`, `server.log`.
+
+### How a request flows
+
+1. Your tool POSTs to `http://127.0.0.1:8788/v1/chat/completions` with `Authorization: Bearer <apiKey>`.
+2. The proxy picks a **site** (China or International) based on the model name you asked for —
+   a bare model ID routes to whichever site serves it cheapest; `site/model` forces one.
+3. It picks an **account** from that site's pool (skipping exhausted or cooling-down ones).
+4. It refreshes the token if needed, trims the history if it exceeds the model window, and
+   forwards the request upstream.
+5. The upstream SSE stream is translated back into OpenAI or Anthropic frames and streamed
+   to your tool as it arrives.
+6. On quota exhaustion or repeated failures it rotates accounts automatically; on gateway
+   errors or a missing model it falls back to another site.
 
 ---
 

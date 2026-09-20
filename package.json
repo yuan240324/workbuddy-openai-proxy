@@ -1,12 +1,24 @@
 {
   "name": "workbuddy-openai-proxy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "把 WorkBuddy / CodeBuddy 账号额度包装成本机 OpenAI + Anthropic 兼容接口（零依赖，仅本机监听）",
+  "description": "Turn WorkBuddy / CodeBuddy (Tencent) quota into a local OpenAI + Anthropic compatible API. 把 WorkBuddy / CodeBuddy 账号额度包装成本机 OpenAI + Anthropic 兼容接口（零依赖，仅本机监听）",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=18"
+  },
+  "keywords": [
+    "openai-compatible",
+    "anthropic",
+    "codebuddy",
+    "workbuddy",
+    "trae",
+    "proxy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yuan240324/workbuddy-openai-proxy.git"
   },
   "scripts": {
     "start": "node server.mjs",
