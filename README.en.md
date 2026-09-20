@@ -19,18 +19,11 @@ Covers **both editions**: China (`copilot.tencent.com`) and International
 
 ### A look at it
 
-<table>
-<tr>
-<td width="50%"><img src="docs/screenshot-terminal.png" alt="one-line startup"><br>
-<sub><b>One-line startup</b> — no npm install, no node_modules</sub></td>
-<td width="50%"><img src="docs/screenshot-console.png" alt="web console"><br>
-<sub><b>Web console</b> — sites, quota, account pool, live logs</sub></td>
-</tr>
-<tr>
-<td colspan="2"><img src="docs/screenshot-models.png" alt="models and credit multipliers"><br>
-<sub><b>Model list</b> — merged across sites, with credit multiplier and context window</sub></td>
-</tr>
-</table>
+![One-line startup — no npm install, no node_modules](docs/screenshot-terminal.png)
+
+![Web console — sites, quota, account pool, live logs](docs/screenshot-console.png)
+
+![Model list — merged across sites, with credit multiplier and context window](docs/screenshot-models.png)
 
 ---
 

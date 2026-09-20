@@ -6,10 +6,6 @@
 包装成本机上的 **OpenAI 兼容 + Anthropic 兼容** 接口，供 **TraeWork / TRAE / TraeCode CLI / Cherry Studio / Cursor** 等
 任意 OpenAI 兼容客户端当作「自定义模型」接入。
 
-> Turn your WorkBuddy (Tencent CodeBuddy) account quota — **both the China and the international
-> edition** — into a local, OpenAI- and Anthropic-compatible HTTP endpoint.
-> Zero dependencies, pure Node.js, loopback-only.
-
 ![Node](https://img.shields.io/badge/Node.js-%E2%89%A5%2018-3c873a?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 ![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen)
@@ -24,18 +20,11 @@
 
 ### 看一眼
 
-<table>
-<tr>
-<td width="50%"><img src="docs/screenshot-terminal.png" alt="一行命令启动"><br>
-<sub><b>一行启动</b> — 没有 npm install，没有 node_modules</sub></td>
-<td width="50%"><img src="docs/screenshot-console.png" alt="网页控制台"><br>
-<sub><b>网页控制台</b> — 站点状态、额度、账号池、日志</sub></td>
-</tr>
-<tr>
-<td colspan="2"><img src="docs/screenshot-models.png" alt="模型与积分倍率"><br>
-<sub><b>模型清单</b> — 自动合并各站点，带积分倍率与上下文窗口，可一键切默认模型</sub></td>
-</tr>
-</table>
+![一行启动：没有 npm install，没有 node_modules](docs/screenshot-terminal.png)
+
+![网页控制台：站点状态、额度、账号池、日志](docs/screenshot-console.png)
+
+![模型清单：自动合并各站点，带积分倍率与上下文窗口](docs/screenshot-models.png)
 
 ---
 
