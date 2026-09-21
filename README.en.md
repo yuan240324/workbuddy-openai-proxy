@@ -15,13 +15,17 @@ Covers **both editions**: China (`copilot.tencent.com`) and International
 ![Platform](https://img.shields.io/badge/tested%20on-Windows%20%C2%B7%20Node%2024-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-<!-- Demo GIF pending: drop it at docs/demo.gif and replace the stills below -->
-
 ### A look at it
 
-![One-line startup — no npm install, no node_modules](docs/screenshot-terminal.png)
+**Wired into TraeWork as a custom model** — ask a question, and the answer streams back through the local proxy:
 
-![Web console — sites, quota, account pool, live logs](docs/screenshot-console.png)
+![A real conversation in TraeWork through the local proxy](docs/demo-chat.gif)
+
+**Web console** — site status, model switching, usage stats, live logs:
+
+![Console: site overview, model switching, usage stats, live logs](docs/demo-console.gif)
+
+![One-line startup — no npm install, no node_modules](docs/screenshot-terminal.png)
 
 ![Model list — merged across sites, with credit multiplier and context window](docs/screenshot-models.png)
 
@@ -296,6 +300,10 @@ Set `"enabled": false` to restore pass-through behavior.
 ---
 
 ## Client setup
+
+Adding a custom model in TraeWork — the whole flow, from filling in the dialog to the model appearing in the list:
+
+![Adding a custom model in TraeWork](docs/demo-config.gif)
 
 <details>
 <summary>Cursor</summary>
