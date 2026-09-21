@@ -8,6 +8,10 @@
 
 > 本分支（`deepseek`）额外支持 **DeepSeek 官方站点**（`chat.deepseek.com`，协议不同：PoW 工作量证明 + 单 prompt），见 §5.5。main 分支不含此项。
 
+> 搜 `workbuddy2api` / `codebuddy2api` / `codebuddy2openai` 找过来的？那些多数是**自托管网关**；
+> 这个是**本机版** —— 零依赖、`node server.mjs` 直接跑，不需要 Docker / Redis / pip。
+> 具体差异见下方「[和同类项目的区别](#和同类项目的区别)」。
+
 ![Node](https://img.shields.io/badge/Node.js-%E2%89%A5%2018-3c873a?logo=node.js&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 ![Tests](https://github.com/yuan240324/workbuddy-openai-proxy/actions/workflows/ci.yml/badge.svg)
@@ -148,6 +152,34 @@ node login.mjs --site cn-cli --no-open
   模型白/黑名单过滤、上游连接级重试与站点自动降级。
 - **另含 `/v1/responses`**（OpenAI Responses API 兼容层），供 Codex CLI / 桌面端接入，见 §9。
 > ℹ️ 本分支（`deepseek`）包含 DeepSeek 官方站点接入的完整实现；main 分支不含。
+
+---
+
+## 和同类项目的区别
+
+这个品类里已经有不少项目（多叫 `workbuddy2api` / `codebuddy2api` / `codebuddy2openai`）。
+它们绝大多数是**自托管网关** —— 给一台常开的机器、或者一群共享额度的用户用，
+所以选了 Docker / Redis / FastAPI 那套技术栈。
+
+这个项目的取向不一样：**它是给你自己这台电脑用的。**
+
+| | 本项目 | 典型的 `*2api` 网关 |
+|---|---|---|
+| **运行时依赖** | **0 个**（只用 Node 内置模块） | 2 ~ 10 个，常见 Redis、FastAPI |
+| **安装** | `git clone` + `node server.mjs` | Docker Compose，或 `pip install` + venv |
+| OpenAI Chat Completions | ✅ | ✅ |
+| Anthropic Messages | ✅ `/v1/messages` | 多数提供 |
+| OpenAI Responses（Codex CLI） | ✅ `/v1/responses` | 部分提供 |
+| 网页控制台 | ✅ 内置 | 多数没有，或拆成另一个项目 |
+| 账号池 | ✅ 本机多账号 | ✅ 部分支持跨机器共享 |
+| 监听范围 | 只绑 `127.0.0.1` | 通常要对外提供服务 |
+| 面向场景 | **本机个人自用** | 服务器 / 多人共享 |
+
+> 上表来自 2026-09 对公开仓库的一次调研，只比对**可验证的客观项**（依赖条数、部署方式、协议支持）。
+> 同类项目迭代很快，请以各自最新 README 为准。
+
+**什么情况下不该选这个项目？** 如果你要的是「一台服务器挂多个人的账号、共享额度」，
+那本项目的定位（只监听 `127.0.0.1`、单机自用）就不合适，去用那些网关项目更好。
 
 ---
 
@@ -643,6 +675,9 @@ node login-deepseek.mjs        # ② 粘贴 token（自动校验，写入 auth.d
 | 想关掉鉴权 | 把 `config.json` 的 `apiKey` 设为 `""` 或 `[]`（仅本机使用时才可以；启动时会打印 WARN 提醒） |
 | 启动报 `端口 xxx 已被占用` | 已有一个实例在跑：`node status.mjs` 查看，`node stop.mjs` 停止；或改 `config.json` 的 `port` |
 | 启动报 `config.json 不是合法 JSON` | 手改配置时漏了/多了逗号，或用了单引号（JSON 只认双引号）。修好后重启；服务不会覆盖你的文件 |
+| 这个和 `workbuddy2api` / `codebuddy2api` 有什么区别？ | 那些多是**自托管网关**（常要 Docker / Redis，面向多人共享）；这个是**本机版**（零依赖、只监听 127.0.0.1）。逐项对比见上方「[和同类项目的区别](#和同类项目的区别)」 |
+| 要装 Python / Docker / Redis 吗？ | 都不用。只要 Node.js ≥ 18，`node server.mjs` 就能跑 |
+| 怎么同时给多个客户端发不同的 Key？ | `config.json` 的 `apiKey` 可以写成字符串数组，数组里每个都有效（见 §9 接口一览） |
 | 启动提示「有 N 处问题已自动回退」 | 这些字段类型不对，已自动改用默认值。按提示逐条修正 `config.json` 即可 |
 | `/v1/models` 或控制台首屏转圈很久 | 上游元数据接口较慢。超过 `timeouts.metaMs`（默认 30s）会自动放弃并回落缓存，可适当调小 |
 

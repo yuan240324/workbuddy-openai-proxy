@@ -7,6 +7,11 @@ OpenAI-compatible client.
 Covers **both editions**: China (`copilot.tencent.com`) and International
 (`codebuddy.ai` / `workbuddy.ai`).
 
+> Arrived here searching for `workbuddy2api` / `codebuddy2api` / `codebuddy2openai`? Those are mostly
+> **self-hosted gateways**; this one is the **local, single-machine** take — zero dependencies,
+> just `node server.mjs`. No Docker, no Redis, no pip. See
+> [How it compares](#how-it-compares).
+
 [中文文档](README.md) · [Features](#features) · [Quick start](#quick-start) · [FAQ](#faq)
 
 ![Node](https://img.shields.io/badge/Node.js-%E2%89%A5%2018-3c873a?logo=node.js&logoColor=white)
@@ -251,6 +256,37 @@ node login.mjs --site cn-cli --no-open
 - **Resilience** — automatic token refresh, connection-level retry with backoff, automatic
   fallback to another site on gateway errors or missing models.
 
+---
+
+## How it compares
+
+There are already a number of projects in this niche (usually named `workbuddy2api` /
+`codebuddy2api` / `codebuddy2openai`). Nearly all of them are **self-hosted gateways** — built for
+an always-on box, or for several people sharing one quota pool — which is why they reach for
+Docker / Redis / FastAPI.
+
+This project makes a different bet: **it is meant for the machine you're sitting at.**
+
+| | This project | Typical `*2api` gateway |
+|---|---|---|
+| **Runtime dependencies** | **zero** (Node built-ins only) | 2–10; commonly Redis, FastAPI |
+| **Install** | `git clone` + `node server.mjs` | Docker Compose, or `pip install` + venv |
+| OpenAI Chat Completions | ✅ | ✅ |
+| Anthropic Messages | ✅ `/v1/messages` | usually |
+| OpenAI Responses (Codex CLI) | ✅ `/v1/responses` | sometimes |
+| Web console | ✅ built in | often absent, or a separate project |
+| Account pool | ✅ local, multi-account | ✅ some support cross-machine sharing |
+| Listen scope | `127.0.0.1` only | usually exposed as a service |
+| Built for | **one person, one machine** | server / shared access |
+
+> The table reflects a survey of public repos in 2026-09, comparing only **objectively checkable
+> things** (dependency count, deployment method, protocol support). This niche moves fast —
+> always trust each project's own latest README.
+
+**When is this the wrong choice?** If what you want is "one server hosting several people's
+accounts with a shared quota pool", this project's design (loopback-only, single-user) is not it —
+use one of the gateway projects instead.
+
 ### Account pool
 
 Add a second account by logging in again — same `uid` updates in place, a new `uid` is added:
@@ -411,6 +447,9 @@ The bundled scripts (`ask.mjs` / `status.mjs` / `stop.mjs`) and the startup bann
 | Empty model list in client | Some clients don't call `/v1/models` — type the model ID manually |
 | `port already in use` | Another instance is running: `node stop.mjs` |
 | Long conversations fail | Should be handled automatically now — please open an issue with the error text |
+| How is this different from `workbuddy2api` / `codebuddy2api`? | Those are mostly **self-hosted gateways** (often Docker / Redis, built for shared access); this one is the **local single-machine** take (zero deps, loopback only). Side-by-side table: [How it compares](#how-it-compares) |
+| Do I need Python / Docker / Redis? | No. Node.js ≥ 18 is the only requirement — `node server.mjs` |
+| How do I give several clients different keys? | Make `apiKey` a string array in `config.json`; every entry is valid. See [API](#api) |
 
 ---
 
