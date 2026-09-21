@@ -1,5 +1,19 @@
 // 极简日志：统一时间戳，并在内存里保留最近 N 条，供控制台实时查看。
-const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+//
+// 时间戳一律用【本地时间】。原先用的 toISOString() 返回的是 UTC，
+// 在东八区会让日志比系统时间慢 8 小时，控制台上看起来像坏了一样。
+// 需要机器可读的绝对时间请另外用 ISO 字符串，不要复用这个格式化函数。
+const pad = (n) => String(n).padStart(2, '0');
+
+/** 本地时间格式化：YYYY-MM-DD HH:mm:ss。d 省略时取当前时间。 */
+export function stamp(d = new Date()) {
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    ` ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  );
+}
+
+const ts = () => stamp();
 
 const BUFFER_MAX = 500;
 const buffer = []; // { seq, time, level, text }

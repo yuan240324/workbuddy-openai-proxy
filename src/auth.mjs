@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import { paths, authPathFor } from './config.mjs';
 import { refreshHeaders } from './headers.mjs';
-import { log, warn } from './log.mjs';
+import { log, warn, stamp } from './log.mjs';
 import {
   DEFAULT_ACCOUNT_ID,
   listAccounts,
@@ -266,7 +266,7 @@ export async function refreshToken(cfg, site, accountId = null) {
       Object.assign(a, next);
       saveAuth(site, stripLegacy(a));
     }
-    log(`[${site}] token 已刷新${id ? `（${id}）` : ''}，uid=${String(next.uid || a.uid || '').slice(0, 8)}… 有效期至 ${expiresAt ? new Date(expiresAt).toISOString() : '未知'}`);
+    log(`[${site}] token 已刷新${id ? `（${id}）` : ''}，uid=${String(next.uid || a.uid || '').slice(0, 8)}… 有效期至 ${expiresAt ? stamp(new Date(expiresAt)) : '未知'}`);
     return next.accessToken;
   } finally {
     clearTimeout(timer);

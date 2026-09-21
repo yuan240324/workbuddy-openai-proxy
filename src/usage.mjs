@@ -14,8 +14,14 @@ let dirty = false;
 let timer = null;
 let loadedFrom = null;
 
+/**
+ * 「今天」的键（YYYY-MM-DD）。
+ * 必须用本地日期：toISOString() 给的是 UTC 日期，东八区下一天的边界会落在早上 8 点，
+ * 凌晨 0~8 点的用量会被记进前一天，「用量统计」的日切就错位了。
+ */
 function todayKey(d = new Date()) {
-  return d.toISOString().slice(0, 10);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 /**
