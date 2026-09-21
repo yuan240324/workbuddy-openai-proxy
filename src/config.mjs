@@ -179,6 +179,16 @@ export function defaultConfig() {
       // 本站点账号全耗尽时，是否降级到备用站点（该站点也有这个模型时）
       switchSiteOnExhausted: true,
     },
+    // 限流：服务只绑 127.0.0.1，所以要挡的不是远程攻击，而是
+    //   1) 客户端 bug 导致的失控重试循环
+    //   2) 重端点被反复触发（/console/api/probe 一次最多 60 次上游调用）
+    // 默认值刻意放宽 —— 正常单用户使用（含编码 agent 的工具调用突发）远达不到。
+    rateLimit: {
+      enabled: true,
+      windowMs: 10_000, // 滑动窗口长度
+      max: 600, // 每窗口每来源 IP 的总请求上限（≈60 次/秒）
+      probeMax: 3, // 其中 /probe 更严（它一次最多 60 次上游调用 + 至少 15 秒）
+    },
     models: DEFAULT_MODELS,
     modelAliases: {},
   };
@@ -376,6 +386,22 @@ export function validateConfig(cfg, defaults = defaultConfig()) {
     }
     if (typeof cfg.pool.switchSiteOnExhausted !== 'boolean') {
       cfg.pool.switchSiteOnExhausted = defaults.pool.switchSiteOnExhausted;
+    }
+  }
+
+  // ---- 限流 ----
+  if (!isPlainObject(cfg.rateLimit)) {
+    fix('rateLimit 必须是对象，已回退为默认值');
+    cfg.rateLimit = structuredClone(defaults.rateLimit);
+  } else {
+    if (typeof cfg.rateLimit.enabled !== 'boolean') {
+      cfg.rateLimit.enabled = defaults.rateLimit.enabled;
+    }
+    for (const k of ['windowMs', 'max', 'probeMax']) {
+      if (!Number.isInteger(cfg.rateLimit[k]) || cfg.rateLimit[k] <= 0) {
+        fix(`rateLimit.${k} 必须是正整数，已回退为 ${defaults.rateLimit[k]}`);
+        cfg.rateLimit[k] = defaults.rateLimit[k];
+      }
     }
   }
 

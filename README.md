@@ -171,6 +171,7 @@ workbuddy-openai-proxy/
     ├── auth.mjs          # 多站点凭证存取 + 自动刷新（单飞）+ 运行中热加载
     ├── pool.mjs          # 账号池：选号 / 额度耗尽标记 / 失败退避 / 轮询分摊
     ├── compress.mjs      # 上下文压缩：超长裁剪 + 中文感知 token 估算
+    ├── ratelimit.mjs     # 滑动窗口限流（内存有界，鉴权前生效）
     ├── device-login.mjs  # 设备授权登录（CLI 与控制台共用）
     ├── headers.mjs       # 站点感知的上游请求头
     ├── upstream.mjs      # 上游聊天/模型/额度接口 + SSE 解析
@@ -650,7 +651,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 **Node 18 / 20
 另有一个 job 专门守住这个声明：检查 `package.json` 没声明任何依赖、仓库里没有 `node_modules` 与 lockfile、
 且在没有 `node_modules` 的情况下能导入全部 `src/` 模块。
 
-覆盖范围（371 个用例）：
+覆盖范围（385 个用例）：
 
 | 测试文件 | 覆盖内容 |
 |---|---|
@@ -662,6 +663,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 **Node 18 / 20
 | `auth.test.mjs` | 凭证刷新、失效清除与临时故障的区分、JWT 解析、并发单飞 |
 | `pool.test.mjs` | 账号池：选号、额度耗尽、失败退避、旧单账号兼容、`getAuth` 跟随池 |
 | `compress.test.mjs` | 上下文压缩：分块不可拆、system 保留、截断、上限解析（含转义 `\u003e`） |
+| `ratelimit.test.mjs` | 限流：滑动窗口、剩余额度、**内存有界**（键数不超上限）、淘汰策略、参数兜底 |
 | `timeout.test.mjs` | 上游挂起时必须超时返回（含响应体阶段） |
 | `paths.test.mjs` | 路径段匹配与 TraeWork 拼接容错 |
 | `usage.test.mjs` | 用量统计、余额采样节流 |
@@ -696,6 +698,36 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 **Node 18 / 20
 
 若 `config.json` 的 `apiKey` 为空，服务会**启动时打印 WARN** 提示当前不做鉴权。
 建议始终保留一个随机密钥。
+
+### 限流（纵深防御）
+
+上面的来源校验与鉴权挡的是**未授权的访问**，挡不住另外两类问题：
+
+1. **客户端 bug 造成的失控重试循环** —— 死循环重试会把上游打爆
+2. **重端点被反复触发** —— `/console/api/probe` 一次最多 60 次上游调用 + 至少 15 秒
+   （源码里那句「顺序执行，避免打爆上游」就是为此）
+
+所以加了滑动窗口限流，**放在鉴权与路由之前** —— 未授权的洪泛也能被廉价拒掉，
+而不是先做完鉴权才发现对方在刷。超限返回 `429` 并带 `Retry-After` 头。
+
+```jsonc
+{
+  "rateLimit": {
+    "enabled": true,
+    "windowMs": 10000,   // 滑动窗口长度
+    "max": 600,          // 每窗口每来源 IP 的总请求上限（≈60 次/秒）
+    "probeMax": 3        // 其中 /probe 更严（它一次最多 60 次上游调用）
+  }
+}
+```
+
+**默认值刻意放宽**：正常单用户使用（含编码 agent 的工具调用突发）远达不到；
+控制台 20 秒轮询一次 `/state` 与 `/logs`，占用可忽略。
+真被限流时日志里会有 `请求过于频繁已限流：…` 一行，据此判断是哪个端点。
+
+> 实现上刻意避免了两件事：一是**不用只写不删的 Map**（那本身就是在制造 CWE-770），
+> 过期键会惰性清扫、并设键数硬上限；二是**不用 `setInterval`**，
+> 定时器会拖住 SIGINT 优雅停机，所以改成每次 `hit()` 顺带判断是否该清扫。
 
 ---
 

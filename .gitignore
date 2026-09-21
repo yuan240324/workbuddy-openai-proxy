@@ -12,8 +12,10 @@ node_modules/
 *.log
 _ref/
 
-# 配置备份（手工改动前的快照，含本机信息，不入库）
-config.json.bak-*
+# 配置备份（手工改动前的快照，含本机信息与 apiKey，绝不入库）
+# 用 `bak*` 而不是 `bak-*`：手工复制出来的 config.json.bak（无时间戳后缀）同样含密钥，
+# 漏掉它等于给未来的 `git add -A` 留了个坑。
+config.json.bak*
 
 # 浏览器用户目录：调试/自动登录时生成，含 Cookie 与登录态，**绝不能提交**
 .chrome-login/

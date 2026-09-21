@@ -398,7 +398,7 @@ Zero dependencies, Node's built-in test runner, no `npm install`:
 npm test        # or: node --test --test-reporter=spec --experimental-test-isolation=none "test/**/*.test.mjs"
 ```
 
-**371 tests passing**, covering config validation, credential refresh, account-pool rotation,
+**385 tests passing**, covering config validation, credential refresh, account-pool rotation,
 context compression, protocol translation (OpenAI ↔ Anthropic ↔ Responses), SSE aggregation,
 timeouts, and an end-to-end security suite (console origin checks, DNS rebinding, auth).
 
