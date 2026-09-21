@@ -264,9 +264,22 @@ export function validateConfig(cfg, defaults = defaultConfig()) {
     cfg.port = defaults.port;
   }
 
-  // ---- 密钥：空串/类型错误都视为"未配置"（由服务层决定是否放行并告警）----
-  if (!isStr(cfg.apiKey)) {
-    fix('apiKey 必须是字符串，已回退为空（服务将不做鉴权）');
+  // ---- 密钥：可以是字符串，也可以是字符串数组。数组里每个都有效，方便同时给
+  //      多个客户端（或演示环境）发不同的密钥，而不用来回改 + 重启。
+  //      空串、类型错误、全空数组都视为"未配置"（由服务层决定是否放行并告警）。----
+  if (Array.isArray(cfg.apiKey)) {
+    const 清理后 = [];
+    for (const k of cfg.apiKey) {
+      if (!isStr(k) || !k.trim()) {
+        fix('apiKey 数组里必须是非空字符串，已忽略其中一项');
+        continue;
+      }
+      const t = k.trim();
+      if (!清理后.includes(t)) 清理后.push(t);
+    }
+    cfg.apiKey = 清理后;
+  } else if (!isStr(cfg.apiKey)) {
+    fix('apiKey 必须是字符串或字符串数组，已回退为空（服务将不做鉴权）');
     cfg.apiKey = '';
   }
 
@@ -563,4 +576,30 @@ export function getSite(cfg, site) {
   const s = cfg.sites?.[site];
   if (!s) throw Object.assign(new Error(`未知站点：${site}（可用：${siteKeys(cfg).join(', ')}）`), { status: 400 });
   return s;
+}
+
+/**
+ * 所有有效的 API 密钥。
+ * `apiKey` 可以是字符串，也可以是字符串数组；数组形式下每个密钥都同样有效。
+ * 空串 / 非字符串 / 全空数组一律返回空数组，调用方据此判断「未配置密钥」。
+ */
+export function authKeys(cfg) {
+  const raw = cfg?.apiKey;
+  const list = Array.isArray(raw) ? raw : [raw];
+  const out = [];
+  for (const k of list) {
+    if (typeof k !== 'string') continue;
+    const t = k.trim();
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/**
+ * 「主密钥」—— 需要单个密钥的场景用它：本项目的脚本自己发请求时的
+ * `Authorization` 头、控制台的掩码展示、启动横幅。
+ * 配了多个时取第一个；未配置时返回空串。
+ */
+export function primaryKey(cfg) {
+  return authKeys(cfg)[0] || '';
 }

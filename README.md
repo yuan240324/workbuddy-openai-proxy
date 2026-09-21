@@ -12,9 +12,10 @@
 ![Platform](https://img.shields.io/badge/tested%20on-Windows%20%C2%B7%20Node%2024-blue)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-> 跨平台说明见下方「三平台差异」。核心逻辑只用 Node 内置模块、无原生依赖，
-> 理论上 Windows / macOS / Linux 都能跑；但**目前只在 Windows + Node 24 上实测过**，
-> 其他平台欢迎反馈（见 §12 的已知边界）。
+> 跨平台说明见下方「三平台差异」。核心逻辑只用 Node 内置模块、无原生依赖。
+> **测试套件**由 CI 在 Linux（`ubuntu-latest`）× Node 18/20/22/24 上跑，全绿；
+> 但**连真实上游账号的端到端实跑只在 Windows + Node 24 上验证过**，
+> macOS 与其他组合欢迎反馈（见 §12 的已知边界）。
 
 ### 看一眼
 
@@ -574,7 +575,7 @@ node status.mjs --site intl-cli  # 只看某个站点
 | 模型回答被截断 | 上游「思考」也计入输出 token；在 TraeWork 高级配置里调大输出上下文窗口 |
 | TraeWork 里模型列表为空 | TraeWork 不拉 `/v1/models`，模型 ID 手填即可 |
 | 想换端口 / 换 Key | 改 `config.json` 后重启服务 |
-| 想关掉鉴权 | 把 `config.json` 的 `apiKey` 设为 `""`（仅本机使用时才可以；启动时会打印 WARN 提醒） |
+| 想关掉鉴权 | 把 `config.json` 的 `apiKey` 设为 `""` 或 `[]`（仅本机使用时才可以；启动时会打印 WARN 提醒） |
 | 启动报 `端口 xxx 已被占用` | 已有一个实例在跑：`node status.mjs` 查看，`node stop.mjs` 停止；或改 `config.json` 的 `port` |
 | 启动报 `config.json 不是合法 JSON` | 手改配置时漏了/多了逗号，或用了单引号（JSON 只认双引号）。修好后重启；服务不会覆盖你的文件 |
 | 启动提示「有 N 处问题已自动回退」 | 这些字段类型不对，已自动改用默认值。按提示逐条修正 `config.json` 即可 |
@@ -628,9 +629,22 @@ node status.mjs --site intl-cli  # 只看某个站点
 
 带不带 `/v1` 前缀都能访问。鉴权：`Authorization: Bearer <apiKey>` 或 `x-api-key: <apiKey>`。
 
+`apiKey` 也可以写成**字符串数组**，数组里每个密钥都同样有效 —— 适合同时给多个客户端
+（或临时给演示 / 录屏环境）发不同的密钥，而不用来回改配置再重启：
+
+```jsonc
+{
+  // 两种写法都支持：单个字符串，或字符串数组
+  "apiKey": ["sk-wb-你的主密钥", "sk-demo-给演示用的密钥"]
+}
+```
+
+本项目自带的脚本（`ask.mjs` / `status.mjs` / `stop.mjs`）与启动横幅一律用**数组里的第一个**
+当主密钥；控制台只展示它的掩码形式，不会显示其余密钥。
+
 ---
 
-## 10. 已验证项（Windows + Node 24 实测）
+## 10. 已验证项（Windows + Node 24 端到端实跑）
 
 - ✅ 设备授权登录、`refresh_token` 自动续期（accessToken 临期 5 分钟内自动刷新，遇 401 强刷重试一次）
 - ✅ 国内版 / 国际版多站点：站点表、独立凭证、`站点/模型` 前缀路由、目录匹配自动选站点
@@ -654,12 +668,12 @@ node status.mjs --site intl-cli  # 只看某个站点
 npm test              # 或：node --test --test-reporter=spec test/*.test.mjs
 ```
 
-CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 **Node 18 / 20 / 22 / 24** 上跑，
-每个版本都先做语法检查再跑全量测试。CI **刻意不做 `npm install`** —— 这本身就是对「零依赖」的持续验证。
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 **Linux（`ubuntu-latest`）× Node 18 / 20 / 22 / 24**
+上跑，每个版本都先做语法检查再跑全量测试。CI **刻意不做 `npm install`** —— 这本身就是对「零依赖」的持续验证。
 另有一个 job 专门守住这个声明：检查 `package.json` 没声明任何依赖、仓库里没有 `node_modules` 与 lockfile、
 且在没有 `node_modules` 的情况下能导入全部 `src/` 模块。
 
-覆盖范围（385 个用例）：
+覆盖范围（392 个用例）：
 
 | 测试文件 | 覆盖内容 |
 |---|---|
@@ -681,8 +695,9 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 **Node 18 / 20
 **测试隔离**：测试通过 `setConfigDir()` / `loadConfig(dir)` 把配置目录指向临时目录，
 不会读写仓库里的 `config.json`、`auth.*.json`、`usage.json`。
 
-> 若你的环境不允许 `--experimental-test-isolation=none`（该参数让测试在单进程内运行），
-> 去掉它即可——每个测试文件也会在独立进程里跑，同样通过。
+> 测试默认按**文件级进程隔离**跑（`node --test` 的默认行为），各文件之间互不影响。
+> v1.3.0 之前用过 `--experimental-test-isolation=none` 把测试塞进单进程，
+> 但那个参数需要 Node 22.8+，会让 Node 18/20 直接报 `bad option`，已经移除了。
 
 ---
 

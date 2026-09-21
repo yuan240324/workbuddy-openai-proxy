@@ -2,7 +2,7 @@
 // 仅本机可用（服务只监听 127.0.0.1），鉴权用控制台会话 token 或 config.json 的 apiKey。
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, siteKeys, saveConfig, paths, authPathFor } from './config.mjs';
+import { ROOT, siteKeys, saveConfig, paths, authPathFor, authKeys, primaryKey } from './config.mjs';
 import { getAuth, isLoggedIn, accountSnapshot } from './auth.mjs';
 import {
   poolPathFor,
@@ -133,7 +133,8 @@ export async function handleConsoleApi(ctx) {
       platform: process.platform,
       default_site: cfg.defaultSite,
       default_model: cfg.defaultModel,
-      api_key_masked: maskKey(cfg.apiKey),
+      api_key_masked: maskKey(primaryKey(cfg)),
+      api_key_count: authKeys(cfg).length,
       base_url: `http://${cfg.host}:${cfg.port}/v1`,
       full_url: `http://${cfg.host}:${cfg.port}/v1/chat/completions`,
       sites,

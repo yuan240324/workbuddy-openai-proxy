@@ -5,11 +5,11 @@
 //   node ask.mjs gpt-5.4 "用一句话介绍你自己"   # 指定模型 + 提示词
 //   node ask.mjs intl-cli/glm-5.3 "你好"       # 用站点前缀强制走国际版
 //   node ask.mjs --list                       # 列出所有可用模型
-import { loadConfig } from './src/config.mjs';
+import { loadConfig, primaryKey } from './src/config.mjs';
 
 const cfg = loadConfig();
 const base = `http://${cfg.host}:${cfg.port}`;
-const headers = { Authorization: 'Bearer ' + cfg.apiKey, 'Content-Type': 'application/json' };
+const headers = { Authorization: 'Bearer ' + primaryKey(cfg), 'Content-Type': 'application/json' };
 const args = process.argv.slice(2);
 
 if (args[0] === '--list' || args[0] === '-l') {
