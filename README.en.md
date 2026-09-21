@@ -152,7 +152,9 @@ Point your client at:
 ### Platform notes
 
 The core is pure Node built-ins with no native modules, so it should run anywhere Node does.
-**It has only been tested on Windows + Node 24** — macOS/Linux reports welcome.
+The **test suite** runs green on CI at Linux (`ubuntu-latest`) × Node 18/20/22/24;
+**end-to-end runs against real upstream accounts have only been verified on Windows + Node 24** —
+macOS and other combinations: reports welcome.
 
 | | Windows | macOS | Linux |
 |---|---|---|---|
@@ -379,6 +381,20 @@ one with `site/model` (e.g. `intl-cli/claude-sonnet-4.6`).
 
 The `/v1` prefix is optional. Auth via `Authorization: Bearer <apiKey>` or `x-api-key: <apiKey>`.
 
+`apiKey` may also be a **string array**, where every entry is equally valid — handy for issuing
+different keys to several clients (or a temporary demo/recording key) without editing the config
+and restarting:
+
+```jsonc
+{
+  // both forms work: a single string, or an array of strings
+  "apiKey": ["sk-wb-your-main-key", "sk-demo-key-for-demos"]
+}
+```
+
+The bundled scripts (`ask.mjs` / `status.mjs` / `stop.mjs`) and the startup banner always use
+**the first entry** as the primary key; the console only ever shows its masked form.
+
 ---
 
 ## FAQ
@@ -403,10 +419,15 @@ The `/v1` prefix is optional. Auth via `Authorization: Bearer <apiKey>` or `x-ap
 Zero dependencies, Node's built-in test runner, no `npm install`:
 
 ```bash
-npm test        # or: node --test --test-reporter=spec --experimental-test-isolation=none "test/**/*.test.mjs"
+npm test        # or: node --test --test-reporter=spec test/*.test.mjs
 ```
 
-**385 tests passing**, covering config validation, credential refresh, account-pool rotation,
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the syntax check and the full suite on
+**Linux (`ubuntu-latest`) × Node 18 / 20 / 22 / 24**, and deliberately skips `npm install` — that itself
+is a continuous check of the zero-dependency claim. A second job guards the claim directly: no declared
+dependencies, no `node_modules` or lockfile, and every `src/` module imports cleanly without them.
+
+**392 tests passing**, covering config validation, credential refresh, account-pool rotation,
 context compression, protocol translation (OpenAI ↔ Anthropic ↔ Responses), SSE aggregation,
 timeouts, and an end-to-end security suite (console origin checks, DNS rebinding, auth).
 
@@ -431,7 +452,7 @@ so the console enforces:
   read the session token injected into the page.
 - `/v1/*` keeps permissive CORS (in-browser clients need it) but is always behind `apiKey`.
 
-If `apiKey` is empty the server prints a startup warning. Keep a random key.
+If `apiKey` is empty (or an empty array) the server prints a startup warning. Keep a random key.
 
 ---
 

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { defaultConfig, validateConfig } from '../src/config.mjs';
+import { defaultConfig, validateConfig, authKeys, primaryKey } from '../src/config.mjs';
 
 /** 造一份合法配置（每次独立，避免测试间串扰）。 */
 const good = () => defaultConfig();
@@ -191,6 +191,52 @@ describe('validateConfig：apiKey 与模型', () => {
     cfg.apiKey = { nested: true };
     validateConfig(cfg);
     assert.equal(cfg.apiKey, '');
+  });
+
+  test('apiKey 可以是字符串数组，数组里每个都保留', () => {
+    const cfg = good();
+    cfg.apiKey = ['sk-a', 'sk-b'];
+    const issues = validateConfig(cfg);
+    assert.deepEqual(cfg.apiKey, ['sk-a', 'sk-b']);
+    assert.deepEqual(issues, [], '合法数组不算配置错误');
+  });
+
+  test('apiKey 数组：去重、trim、丢空串与非字符串', () => {
+    const cfg = good();
+    cfg.apiKey = ['sk-a', '  sk-b  ', 'sk-a', '', '   ', 123, null, 'sk-b'];
+    validateConfig(cfg);
+    assert.deepEqual(cfg.apiKey, ['sk-a', 'sk-b']);
+  });
+
+  test('apiKey 空数组 = 未配置', () => {
+    const cfg = good();
+    cfg.apiKey = [];
+    validateConfig(cfg);
+    assert.deepEqual(cfg.apiKey, []);
+    assert.equal(authKeys(cfg).length, 0);
+    assert.equal(primaryKey(cfg), '', '未配置时主密钥为空串');
+  });
+
+  test('authKeys / primaryKey：字符串形式会 trim', () => {
+    const cfg = good();
+    cfg.apiKey = '  sk-only  ';
+    assert.deepEqual(authKeys(cfg), ['sk-only']);
+    assert.equal(primaryKey(cfg), 'sk-only');
+  });
+
+  test('authKeys / primaryKey：数组形式取第一个当主密钥', () => {
+    const cfg = good();
+    cfg.apiKey = ['sk-main', 'sk-demo', 'sk-third'];
+    assert.deepEqual(authKeys(cfg), ['sk-main', 'sk-demo', 'sk-third']);
+    assert.equal(primaryKey(cfg), 'sk-main');
+  });
+
+  test('authKeys 面对坏输入不抛异常，返回空数组', () => {
+    assert.deepEqual(authKeys(null), []);
+    assert.deepEqual(authKeys({}), []);
+    assert.deepEqual(authKeys({ apiKey: { x: 1 } }), []);
+    assert.deepEqual(authKeys({ apiKey: [null, 42, ''] }), []);
+    assert.deepEqual(primaryKey({ apiKey: [] }), '');
   });
 
   test('defaultModel 为空时回退', () => {

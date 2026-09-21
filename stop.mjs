@@ -1,7 +1,7 @@
 // 停止本地反代服务：node stop.mjs
 // 通过服务自身的管理接口优雅退出（需要 config.json 里的本地 API Key），
 // 不依赖 WMI / 进程枚举，任何环境下都可用。
-import { loadConfig } from './src/config.mjs';
+import { loadConfig, primaryKey } from './src/config.mjs';
 
 const cfg = loadConfig();
 const url = `http://${cfg.host}:${cfg.port}/admin/shutdown`;
@@ -9,7 +9,7 @@ const url = `http://${cfg.host}:${cfg.port}/admin/shutdown`;
 try {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { Authorization: 'Bearer ' + cfg.apiKey },
+    headers: { Authorization: 'Bearer ' + primaryKey(cfg) },
     signal: AbortSignal.timeout(5000),
   });
   const j = await res.json().catch(() => ({}));

@@ -7,7 +7,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { loadConfig, getLastConfigIssues, paths, siteKeys, ROOT } from './src/config.mjs';
+import { loadConfig, getLastConfigIssues, paths, siteKeys, authKeys, primaryKey, ROOT } from './src/config.mjs';
 import { getAuth, isLoggedIn } from './src/auth.mjs';
 import { handleChatCompletions, handleModels } from './src/openai.mjs';
 import { handleResponses } from './src/responses.mjs';
@@ -140,11 +140,12 @@ function clientKey(req) {
 }
 
 function authorized(req) {
-  // 注意：apiKey 为空串时也必须视为「未配置密钥」而不是「放行」。
+  // 注意：密钥为空时必须视为「未配置密钥」而不是「放行」。
   // 原本的 !cfg.apiKey 会让被误清空的配置变成完全无鉴权，这里显式判定。
-  const key = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : '';
-  if (!key) return true; // 未配置密钥则不校验（仅建议本机场景）
-  return clientKey(req) === key;
+  // apiKey 可以是字符串或字符串数组，数组里每个都有效（见 config.mjs 的 authKeys）。
+  const keys = authKeys(cfg);
+  if (!keys.length) return true; // 未配置密钥则不校验（仅建议本机场景）
+  return keys.includes(clientKey(req));
 }
 
 const server = http.createServer(async (req, res) => {
@@ -411,12 +412,14 @@ server.listen(cfg.port, cfg.host, () => {
   log('WorkBuddy 反代已启动（国内版 + 国际版多站点）');
   log(`  控制台：http://${cfg.host}:${cfg.port}/console   ← 建议用桌面快捷方式打开`);
   log(`  监听地址：http://${cfg.host}:${cfg.port}   （仅本机可达）`);
-  const keyLen = typeof cfg.apiKey === 'string' ? cfg.apiKey.trim().length : 0;
-  if (!keyLen) {
+  const keys = authKeys(cfg);
+  if (!keys.length) {
     warn('  config.json 未配置 apiKey，服务当前不做鉴权（任何本机程序均可调用）。建议补一个随机密钥。');
   } else {
     // 不打印完整密钥，避免被日志文件/控制台历史泄露
-    log(`  API Key：${cfg.apiKey.slice(0, 6)}…${cfg.apiKey.slice(-4)}（完整值见 config.json）`);
+    const first = primaryKey(cfg);
+    const extra = keys.length > 1 ? `（另有 ${keys.length - 1} 个密钥同样有效）` : '';
+    log(`  API Key：${first.slice(0, 6)}…${first.slice(-4)}${extra}（完整值见 config.json）`);
   }
   log(`  默认站点/模型：${cfg.defaultSite} / ${cfg.defaultModel}    配置文件：${paths.config}`);
   reportConfigIssues();

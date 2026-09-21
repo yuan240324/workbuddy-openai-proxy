@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 15_000 + Math.floor(Math.random() * 2000);
 const API_KEY = 'sk-wb-test-security';
+// apiKey 配成数组时，数组里每个密钥都应同样有效（见下面「鉴权」一节的用例）
+const API_KEY_2 = 'sk-wb-test-demo';
 
 let child = null;
 let tmpDir = null;
@@ -88,7 +90,7 @@ before(async () => {
   fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify({
     host: '127.0.0.1',
     port: PORT,
-    apiKey: API_KEY,
+    apiKey: [API_KEY, API_KEY_2],
     defaultSite: 'cn-cli',
     defaultModel: 'm',
     defaultMaxTokens: 100,
@@ -236,14 +238,25 @@ describe('P0-2：API Key 鉴权', () => {
 
   test('正确 key 放行', async (t) => {
     if (skipIfBlocked(t)) return;
-    const res = await raw(PORT, '/v1/models', { headers: { Authorization: `Bearer ${API_KEY}` } });
-    assert.equal(statusOf(res), 200);
+    // 注意：不能用 /v1/models 测鉴权 —— 那个端点是故意免鉴权的
+    // （客户端的配置向导会裸探模型目录）。用一个「过了鉴权才会走到 404」的路径。
+    const res = await raw(PORT, '/definitely/not/an/endpoint', { headers: { Authorization: `Bearer ${API_KEY}` } });
+    assert.equal(statusOf(res), 404, '鉴权通过后应走到 404');
   });
 
   test('x-api-key 头同样被接受', async (t) => {
     if (skipIfBlocked(t)) return;
-    const res = await raw(PORT, '/v1/models', { headers: { 'x-api-key': API_KEY } });
-    assert.equal(statusOf(res), 200);
+    const res = await raw(PORT, '/definitely/not/an/endpoint', { headers: { 'x-api-key': API_KEY } });
+    assert.equal(statusOf(res), 404, '鉴权通过后应走到 404');
+  });
+
+  test('apiKey 配成数组时，数组里每个密钥同样有效', async (t) => {
+    if (skipIfBlocked(t)) return;
+    const probe = (key) =>
+      raw(PORT, '/definitely/not/an/endpoint', { headers: { Authorization: `Bearer ${key}` } });
+    assert.equal(statusOf(await probe(API_KEY)), 404, '主密钥应通过鉴权');
+    assert.equal(statusOf(await probe(API_KEY_2)), 404, '数组里的第二个密钥同样应通过');
+    assert.equal(statusOf(await probe('sk-not-configured')), 401, '未配置的密钥必须被拒');
   });
 
   test('/v1/* 仍保留宽松 CORS（浏览器内客户端需要）', async (t) => {

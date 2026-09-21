@@ -1,5 +1,5 @@
 // 查看各站点登录状态与剩余积分：node status.mjs [--site intl-cli]
-import { loadConfig } from './src/config.mjs';
+import { loadConfig, primaryKey } from './src/config.mjs';
 
 const cfg = loadConfig();
 const args = process.argv.slice(2);
@@ -9,7 +9,7 @@ const base = `http://${cfg.host}:${cfg.port}`;
 
 try {
   const qs = only ? `?site=${encodeURIComponent(only)}` : '';
-  const res = await fetch(`${base}/status${qs}`, { headers: { Authorization: 'Bearer ' + cfg.apiKey } });
+  const res = await fetch(`${base}/status${qs}`, { headers: { Authorization: 'Bearer ' + primaryKey(cfg) } });
   const j = await res.json();
   console.log(`服务：${base}  （HTTP ${res.status}）  默认站点：${j.default_site}`);
   console.log('');
