@@ -18,13 +18,17 @@
 > 理论上 Windows / macOS / Linux 都能跑；但**目前只在 Windows + Node 24 上实测过**，
 > 其他平台欢迎反馈（见 §12 的已知边界）。
 
-<!-- 演示 GIF 待补：录好后放 docs/demo.gif，替换下面的静态截图 -->
-
 ### 看一眼
 
-![一行启动：没有 npm install，没有 node_modules](docs/screenshot-terminal.png)
+**接进 TraeWork 当自定义模型用** —— 提问、拿回答，全程走本机代理：
 
-![网页控制台：站点状态、额度、账号池、日志](docs/screenshot-console.png)
+![在 TraeWork 里接入后正常对话](docs/demo-chat.gif)
+
+**网页控制台** —— 状态总览、模型切换、用量统计、实时日志：
+
+![控制台：状态总览、模型切换、用量统计、实时日志](docs/demo-console.gif)
+
+![一行启动：没有 npm install，没有 node_modules](docs/screenshot-terminal.png)
 
 ![模型清单：自动合并各站点，带积分倍率与上下文窗口](docs/screenshot-models.png)
 
@@ -290,6 +294,10 @@ node ask.mjs claude-sonnet-4.6 "你好"    # 直接提问，会显示是哪个�
 > **强烈建议模型 ID 填 `default`**：它是个虚拟模型，指向控制台里设置的「默认模型」。
 > 以后想改用 Claude / GPT / GLM，只需在控制台点一下切换，**TraeWork 那边一个字都不用改**。
 > 也可以用站点前缀强制指定，例如 `intl-cli/claude-sonnet-4.6`。
+
+填写与添加成功的完整过程：
+
+![在 TraeWork 里添加自定义模型：填地址、模型 ID、密钥，添加后出现在模型列表](docs/demo-config.gif)
 
 **高级配置**（建议）：
 
