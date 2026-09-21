@@ -16,6 +16,7 @@ import { queryCredit, supportsCreditQuery } from './src/upstream.mjs';
 import { handleConsoleApi } from './src/console-api.mjs';
 import { flushUsage } from './src/usage.mjs';
 import { flushPool } from './src/pool.mjs';
+import { createRateLimiter } from './src/ratelimit.mjs';
 import { readJsonBody, sendJson, sendError } from './src/util.mjs';
 import { log, warn, error } from './src/log.mjs';
 
@@ -42,6 +43,26 @@ try {
 // 控制台会话 token：每次启动随机生成，注入到控制台页面里；避免把 apiKey 暴露在浏览器中
 const CONSOLE_TOKEN = crypto.randomBytes(16).toString('hex');
 const CONSOLE_DIR = path.join(ROOT, 'console');
+
+// ---- 限流 ----
+// 服务只绑 127.0.0.1，所以要挡的不是远程攻击，而是：
+//   - 客户端 bug 造成的失控重试循环
+//   - 重端点被反复触发（/console/api/probe 一次最多 60 次上游调用 + 至少 15 秒）
+// 放在**鉴权与路由之前**：这样未授权的请求也能被廉价拒掉，
+// 而不是先做完鉴权才发现对方在刷。
+// 默认值刻意放宽，正常单用户使用（含编码 agent 的工具调用突发）远达不到。
+const 限流配置 = cfg.rateLimit || {};
+const 限流开启 = 限流配置.enabled !== false;
+const 全局限流 = 限流开启
+  ? createRateLimiter({ windowMs: 限流配置.windowMs, max: 限流配置.max })
+  : null;
+// /probe 单独一档，阈值更严
+const 探测限流 = 限流开启 ? createRateLimiter({ windowMs: 限流配置.windowMs, max: 限流配置.probeMax }) : null;
+
+/** 请求来源标识：本机服务下基本恒为回环地址，但仍按 IP 记，绑 0.0.0.0 时才有区分度。 */
+function 来源标识(req) {
+  return req.socket?.remoteAddress || 'unknown';
+}
 
 function consoleAuthorized(req) {
   if ((req.headers['x-console-token'] || '') === CONSOLE_TOKEN) return true;
@@ -159,6 +180,25 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
+  }
+
+  // ---- 限流 ----
+  // 位置：OPTIONS 之后（预检不计入）、鉴权与路由之前（未授权洪泛也能被廉价拒掉）。
+  // 两级：全局一档；/console/api/probe 另有一档更严的阈值。
+  if (全局限流) {
+    const ip = 来源标识(req);
+    const 全局结果 = 全局限流.hit(ip);
+    const 是重端点 = pathname.startsWith('/console/api/probe');
+    const 重端点结果 = 是重端点 && 探测限流 ? 探测限流.hit(ip) : null;
+    if (全局结果.limited || 重端点结果?.limited) {
+      const 等待毫秒 = Math.max(全局结果.retryAfterMs || 0, 重端点结果?.retryAfterMs || 0);
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(等待毫秒 / 1000))));
+      warn(
+        `请求过于频繁已限流：${req.method} ${pathname} ip=${ip}`
+        + `${重端点结果?.limited ? '（重端点额度用尽）' : ''}`,
+      );
+      return sendError(res, 429, '请求过于频繁，请稍后再试', 'rate_limited');
+    }
   }
 
   const ac = new AbortController();
