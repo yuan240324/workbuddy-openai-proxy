@@ -37,6 +37,10 @@
 
 ![模型清单：自动合并各站点，带积分倍率与上下文窗口](docs/screenshot-models.png)
 
+> 📚 **详细操作文档**（README 塞不下的部分）
+> [本地部署](docs/setup.md) · [客户端接入](docs/clients.md) · [排障手册](docs/troubleshooting.md) · [模型与额度](docs/models-and-quota.md)
+> —— 逐平台部署与开机自启、逐客户端接入步骤、按错误分类的排障、路由与号池规则。
+
 ---
 
 ## 30 秒上手（不用装任何东西）
