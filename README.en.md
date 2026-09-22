@@ -34,6 +34,10 @@ Covers **both editions**: China (`copilot.tencent.com`) and International
 
 ![Model list — merged across sites, with credit multiplier and context window](docs/screenshot-models.png)
 
+> 📚 **In-depth guides** (the parts that don't fit in a README)
+> [Setup](docs/setup.md) · [Client setup](docs/clients.md) · [Troubleshooting](docs/troubleshooting.md) · [Models & quota](docs/models-and-quota.md)
+> — per-platform install and autostart, per-client wiring, error-by-error fixes, routing and pool rules.
+
 ---
 
 ## Overview
