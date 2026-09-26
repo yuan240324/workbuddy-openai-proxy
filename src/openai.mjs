@@ -2,6 +2,7 @@
 // 多站点：请求里的 model 可写裸 ID（自动选站点），也可写 `站点/模型` 显式指定。
 import { openChat, openChatRotating, aggregateFrames, classifyFrame, upstreamErrorMessage, newId } from './upstream.mjs';
 import { ensureToken } from './auth.mjs';
+import { isQuotaError } from './pool.mjs';
 import { resolveTarget, mergedModels, parseMultiplier, isExcluded } from './router.mjs';
 import { recordUsage } from './usage.mjs';
 import { startSSE, writeSSE, sendJson, sendError, estimateTokens } from './util.mjs';
@@ -63,10 +64,35 @@ export function isGatewayError(status) {
 
 /** 换个站点重试同一请求（用于降级）。换站点后账号池也换了一套，因此 exclude 重置。 */
 async function openWithFallback(cfg, target, upstreamBody, signal, 原因) {
-  warn(`[${target.site}] ${原因}，自动降级到备用站点 ${target.fallback.site} 重试`);
+  const 目标站点 = target.fallback.site;
+  warn(`[${target.site}] ${原因}，自动降级到备用站点 ${目标站点} 重试`);
   upstreamBody.model = target.fallback.model;
-  const r = await openWithRetry(cfg, target.fallback.site, upstreamBody, signal);
-  return { up: r.up, site: target.fallback.site, model: target.fallback.model };
+  try {
+    // 注意：openWithRetry 直接返回 up 句柄本身（不是 { up } 包装）。
+    // 这里曾写成 `const r = await openWithRetry(...); return { up: r.up, ... }`，
+    // 于是 r.up 恒为 undefined，四条降级路径全都在上层的 `up.ok` 处抛
+    // TypeError: Cannot read properties of undefined (reading 'ok')。
+    const up = await openWithRetry(cfg, 目标站点, upstreamBody, signal);
+    return { up, site: 目标站点, model: target.fallback.model };
+  } catch (e) {
+    // 备用站点自己也没连上。**不能把异常抛出去**：那会越过下面所有 `up.ok` 判断，
+    // 变成 handleChatCompletions 未捕获的异常 → 客户端只看到一句「处理失败」，
+    // 既不知道原站点为什么失败，也不知道备用站点为什么失败。
+    // 这里造一个「失败形态」的 up（字段与上游返回的失败结构一致），
+    // 让调用方照常走统一的 !up.ok 分支，错误信息里两个原因都在。
+    const 备用原因 = e?.cause?.code || e?.message || String(e);
+    warn(`[${目标站点}] 备用站点同样失败：${备用原因}`);
+    return {
+      up: {
+        ok: false,
+        status: e?.status || 504,
+        text: `降级前：${原因}；备用站点 ${目标站点} 也失败：${备用原因}`,
+        site: 目标站点,
+      },
+      site: 目标站点,
+      model: target.fallback.model,
+    };
+  }
 }
 
 export async function handleChatCompletions(ctx) {
@@ -121,6 +147,20 @@ export async function handleChatCompletions(ctx) {
     up = r.up;
     site = r.site;
     model = r.model;
+  }
+  // 站点降级：本站在额度层被挡住（429 限流 / 402 积分不足 / quota 文案）→ 换还有额度的备用站点。
+  //
+  // 为什么必须放在这里、而不是上面 catch 里的 switchSiteOnExhausted 分支：
+  //   openChatRotating 对 HTTP 错误是 **return** 而不是 throw（只有连接级故障才抛），
+  //   所以 429 这类「账号被打上耗尽标记」的情况根本进不了 catch，
+  //   那条 switchSiteOnExhausted 分支实际上只能覆盖连接异常，覆盖不到它真正想覆盖的场景。
+  if (!up.ok && target.fallback && site !== target.fallback.site && !signal?.aborted && isQuotaError(up.status, up.text)) {
+    if (cfg.pool?.switchSiteOnExhausted !== false) {
+      const r = await openWithFallback(cfg, target, upstreamBody, signal, `本站点额度受限（HTTP ${up.status}）`);
+      up = r.up;
+      site = r.site;
+      model = r.model;
+    }
   }
   if (!up.ok) {
     requestLog({ site, model, mode: wantsStream ? 'stream' : 'json', status: up.status, ms: Date.now() - started, note: 'upstream_reject' });
