@@ -1,10 +1,11 @@
 // resolveTarget 路由优先级测试。
 // 只覆盖「不需要访问上游目录」的分支（显式前缀 / 别名 / 路由表 / 默认值），
 // 这些分支不触发网络与凭证读取，因此可以稳定单测。
-// 目录匹配分支需要真实上游，不在单测范围内。
+// 目录匹配分支需要真实上游，不在单测范围内——它和降级选站共用的排序逻辑
+// 已抽成纯函数 rankSiteCandidates，在文件末尾单独覆盖。
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveTarget } from '../src/router.mjs';
+import { resolveTarget, rankSiteCandidates } from '../src/router.mjs';
 
 function mkCfg(over = {}) {
   return {
@@ -174,5 +175,81 @@ describe('resolveTarget：返回结构', () => {
     const r = await resolveTarget(cfg, 'intl-work/auto');
     assert.equal(r.site, 'intl-work');
     assert.equal(r.model, 'auto');
+  });
+});
+
+describe('rankSiteCandidates：选站排序（降级目标与目录匹配共用）', () => {
+  test('还有可用账号的站点优先，即使它的倍率更高', () => {
+    // 回归：请求首发 intl-cli 拿到 429，降级目标曾算成同样 429 的 cn-cli，
+    // 原因是只比倍率——cn-cli 的倍率有限，而 intl-work 是内置清单（倍率 Infinity）。
+    // 结果是从一个死站换到另一个死站，真正有额度的站点没被考虑。
+    const 排序 = rankSiteCandidates(
+      [
+        { site: 'cn-cli', mult: 0.8, usable: false },
+        { site: 'intl-work', mult: Infinity, usable: true },
+      ],
+      'cn-cli',
+    );
+    assert.equal(排序[0].site, 'intl-work');
+  });
+
+  test('都还有可用账号时按倍率升序', () => {
+    const 排序 = rankSiteCandidates(
+      [
+        { site: 'a', mult: 1.5, usable: true },
+        { site: 'b', mult: 0.7, usable: true },
+      ],
+      'a',
+    );
+    assert.equal(排序[0].site, 'b');
+  });
+
+  test('都没有可用账号时退回按倍率排序（保持改动前的行为）', () => {
+    // 额度可能已经重置，所以「全都不可用」时不能变成不发请求，
+    // 排序结果必须与改动前一致。
+    const 排序 = rankSiteCandidates(
+      [
+        { site: 'a', mult: 1.5, usable: false },
+        { site: 'b', mult: 0.7, usable: false },
+      ],
+      'a',
+    );
+    assert.equal(排序[0].site, 'b');
+  });
+
+  test('倍率未知（Infinity，内置清单没有 credits）排在已知倍率之后', () => {
+    const 排序 = rankSiteCandidates(
+      [
+        { site: 'seed', mult: Infinity, usable: true },
+        { site: 'dynamic', mult: 3, usable: true },
+      ],
+      'seed',
+    );
+    assert.equal(排序[0].site, 'dynamic');
+  });
+
+  test('倍率相同时偏向 defaultSite', () => {
+    const 排序 = rankSiteCandidates(
+      [
+        { site: 'other', mult: 1, usable: true },
+        { site: 'home', mult: 1, usable: true },
+      ],
+      'home',
+    );
+    assert.equal(排序[0].site, 'home');
+  });
+
+  test('是纯函数：不改动传入数组', () => {
+    const 输入 = [
+      { site: 'a', mult: 2, usable: false },
+      { site: 'b', mult: 1, usable: true },
+    ];
+    const 快照 = JSON.parse(JSON.stringify(输入));
+    rankSiteCandidates(输入, 'a');
+    assert.deepEqual(输入, 快照);
+  });
+
+  test('空候选返回空数组', () => {
+    assert.deepEqual(rankSiteCandidates([], 'a'), []);
   });
 });

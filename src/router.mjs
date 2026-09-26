@@ -4,6 +4,7 @@ import { siteKeys } from './config.mjs';
 import { isLoggedIn } from './auth.mjs';
 import { fetchModels } from './upstream.mjs';
 import { learnLimit } from './compress.mjs';
+import { usableCount } from './pool.mjs';
 
 const TTL_OK = 5 * 60 * 1000;
 const TTL_ERR = 60 * 1000;
@@ -142,17 +143,54 @@ function disabledSiteError(site, raw) {
   );
 }
 
-/** 计算备用站点：除了「首选站点」以外，还有哪些站点真的拥有该模型（按倍率升序）。 */
+/**
+ * 该站点现在还有没有「可用账号」（启用 + 没冷却 + 没被判额度耗尽）。
+ *
+ * 为什么要参与选站排序：只按倍率排序时，一个**额度已经耗尽**的站点会因为倍率更低
+ * 而被优先选中；降级重试也照这个顺序挑，于是从一个死站换到另一个死站。
+ * 实测：请求首发 intl-cli 返回 429，降级目标被算成同样 429 的 cn-cli，
+ * 而真正有额度的 intl-work（倍率未知 → Infinity，排在最后）根本没被考虑。
+ *
+ * 注意这是**排序优先级**而不是硬过滤：当所有候选都没有可用账号时，
+ * 排序结果与改动前完全一致，仍然会发一次请求（额度可能已经重置了）。
+ */
+function 有可用账号(site) {
+  try {
+    return usableCount(site) > 0;
+  } catch {
+    // 读池失败不该影响路由，按「可能有」处理以保持原有行为
+    return true;
+  }
+}
+
+/**
+ * 站点候选排序：① 还有可用账号的优先 ② 倍率低的优先（倍率未知视作最贵）
+ * ③ 同级时偏向 config.defaultSite。
+ *
+ * 抽成纯函数有两个目的：消除「降级选站」与「目录匹配选站」两处重复的比较器，
+ * 并且让这段最容易回归的排序逻辑能被单测覆盖（它依赖的 getCatalog 需要真实上游，
+ * 直接测 computeFallback 是测不了的）。
+ */
+export function rankSiteCandidates(candidates, defaultSite) {
+  return [...candidates].sort(
+    (a, b) =>
+      Number(Boolean(b.usable)) - Number(Boolean(a.usable)) ||
+      a.mult - b.mult ||
+      (a.site === defaultSite ? -1 : 1),
+  );
+}
+
+/** 计算备用站点：除了「首选站点」以外，还有哪些站点真的拥有该模型。 */
 async function computeFallback(cfg, 首选站点, 目标模型) {
   const 备选 = [];
   for (const s of siteKeys(cfg)) {
     if (s === 首选站点) continue;
     const cat = await getCatalog(cfg, s);
     const info = cat.models.get(目标模型);
-    if (info) 备选.push({ site: s, mult: parseMultiplier(info.credits) });
+    if (info) 备选.push({ site: s, mult: parseMultiplier(info.credits), usable: 有可用账号(s) });
   }
-  备选.sort((a, b) => a.mult - b.mult || (a.site === cfg.defaultSite ? -1 : 1));
-  return 备选.length ? { site: 备选[0].site, model: 目标模型 } : null;
+  const 排序 = rankSiteCandidates(备选, cfg.defaultSite);
+  return 排序.length ? { site: 排序[0].site, model: 目标模型 } : null;
 }
 
 /**
@@ -243,20 +281,20 @@ async function resolveTargetInner(cfg, requestedModel) {
     }
   }
 
-  // 4) 目录匹配：多站点都有该模型时，选倍率最低的（未知倍率排最后）
+  // 4) 目录匹配：多站点都有该模型时，优先选「还有可用账号」的，再选倍率最低的（未知倍率排最后）
   const hits = [];
   if (process.env.WB_ROUTE_DEBUG) console.log('[调试] 目标模型=' + 目标模型 + '　站点列表=' + sites.join(','));
   for (const s of sites) {
     const cat = await getCatalog(cfg, s);
     const info = cat.models.get(目标模型);
     if (process.env.WB_ROUTE_DEBUG) console.log('[调试]   ' + s + ' 目录' + cat.models.size + '个(来源' + cat.source + ') 命中=' + (info ? '是' : '否') + (info ? ' 倍率=' + info.credits + '→' + parseMultiplier(info.credits) : ''));
-    if (info) hits.push({ site: s, mult: parseMultiplier(info.credits) });
+    if (info) hits.push({ site: s, mult: parseMultiplier(info.credits), usable: 有可用账号(s) });
   }
   if (process.env.WB_ROUTE_DEBUG) console.log('[调试] 命中集合=' + JSON.stringify(hits));
   if (hits.length) {
-    hits.sort((a, b) => a.mult - b.mult || (a.site === cfg.defaultSite ? -1 : 1));
-    if (process.env.WB_ROUTE_DEBUG) console.log('[调试] 排序后=' + JSON.stringify(hits) + ' → 选 ' + hits[0].site);
-    return { site: hits[0].site, model: 目标模型, requested: raw };
+    const 排序 = rankSiteCandidates(hits, cfg.defaultSite);
+    if (process.env.WB_ROUTE_DEBUG) console.log('[调试] 排序后=' + JSON.stringify(排序) + ' → 选 ' + 排序[0].site);
+    return { site: 排序[0].site, model: 目标模型, requested: raw };
   }
 
   // 5) 兜底：默认站点。若该模型被全局剔除，直接报错而不是发一个注定失败的请求
