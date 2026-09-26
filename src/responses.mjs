@@ -112,6 +112,13 @@ export function toChatRequest(body) {
   if (body.temperature !== undefined) chat.temperature = body.temperature;
   if (body.top_p !== undefined) chat.top_p = body.top_p;
 
+  // ── reasoning.effort → reasoning_effort ──
+  // 客户端（DSH / Codex）用 reasoning.effort 表达思考强度（minimal/low/medium/high）。
+  // 之前这里整个丢弃，导致上游永远按默认强度跑、客户端也显示不出强度。
+  // 映射名沿用生态标准（cc-switch / LiteLLM / zcode-proxy 同款）。
+  // 上游不认识该字段时一般会忽略，不会 400；若实测发现上游严格校验，改走 stripFields 剔除。
+  if (body.reasoning?.effort) chat.reasoning_effort = body.reasoning.effort;
+
   // tools：Responses 是扁平的 {type,name,parameters}，Chat 是嵌套的 {type,function:{...}}
   if (Array.isArray(body.tools) && body.tools.length) {
     const tools = [];
@@ -160,7 +167,7 @@ function normalizeContent(content) {
 }
 
 /** 组装一个完整的 Responses 对象（供非流式与流式收尾共用）。 */
-function buildResponse({ id, model, status, output, usage, createdAt }) {
+function buildResponse({ id, model, status, output, usage, createdAt, reasoning }) {
   return {
     id,
     object: 'response',
@@ -168,6 +175,9 @@ function buildResponse({ id, model, status, output, usage, createdAt }) {
     status,
     model,
     output,
+    // 回显请求里的思考强度配置。客户端（DSH / Codex）据此显示「思考强度」，
+    // 之前这里恒为 undefined，所以客户端拿不到有效值、显示不出来。
+    reasoning: reasoning || null,
     parallel_tool_calls: true,
     tool_choice: 'auto',
     tools: [],
@@ -246,6 +256,10 @@ export async function handleResponses(ctx) {
   const started = Date.now();
   const wantsStream = body.stream !== false;
 
+  // 回显给客户端用的思考强度配置。原样透传请求里的值（客户端自己发的最准），
+  // 没有就回 null —— 客户端据此显示「思考强度」。
+  const reasoningEcho = body.reasoning && typeof body.reasoning === 'object' ? body.reasoning : null;
+
   // 先解析模型（保持与 chat 相同的路由语义：支持 site/model 前缀与别名）
   const target = await resolveTarget(cfg, body.model);
   let { site, model } = target;
@@ -305,6 +319,7 @@ export async function handleResponses(ctx) {
         output: toOutput(agg),
         usage,
         createdAt: agg.created,
+        reasoning: reasoningEcho,
       }),
     );
   }
@@ -332,10 +347,10 @@ export async function handleResponses(ctx) {
 
   try {
     await emit('response.created', {
-      response: buildResponse({ id: responseId, model: requestModel, status: 'in_progress', output: [] }),
+      response: buildResponse({ id: responseId, model: requestModel, status: 'in_progress', output: [], reasoning: reasoningEcho }),
     });
     await emit('response.in_progress', {
-      response: buildResponse({ id: responseId, model: requestModel, status: 'in_progress', output: [] }),
+      response: buildResponse({ id: responseId, model: requestModel, status: 'in_progress', output: [], reasoning: reasoningEcho }),
     });
 
     for await (const payload of up.frames) {
@@ -348,6 +363,7 @@ export async function handleResponses(ctx) {
             status: 'failed',
             output: [],
             usage: null,
+            reasoning: reasoningEcho,
           }),
         });
         break;
@@ -564,6 +580,7 @@ export async function handleResponses(ctx) {
         status: 'completed',
         output: finalOutput,
         usage,
+        reasoning: reasoningEcho,
       }),
     });
   } catch (e) {
