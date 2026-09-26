@@ -40,6 +40,9 @@ const acct = (n, extra = {}) => ({
  */
 function fresh() {
   setConfigDir(tmpDir);
+  // 兼容模式的耗尽/冷却记在内存里（不落盘），切目录不会清掉它，
+  // 必须显式清空，否则上一个用例的状态会漏到下一个用例。
+  pool.clearLegacyState();
   fs.rmSync(pool.poolPathFor('cn-cli'), { force: true });
   fs.rmSync(authPathFor('cn-cli'), { force: true });
   fs.rmSync(path.join(tmpDir, 'auth.json'), { force: true });
@@ -79,6 +82,107 @@ describe('号池：旧单账号兼容', () => {
     assert.ok(list.some((a) => a.id === pool.DEFAULT_ACCOUNT_ID), '旧账号应保留');
     assert.ok(list.some((a) => a.label === '新号'));
     assert.equal(pool.hasPoolFile('cn-cli'), true);
+  });
+});
+
+// 兼容模式只有一个账号、没有池文件，所以 markFailure/markExhausted 刻意不落盘，
+// 否则控制台轮询这类只读场景会凭空建出池文件。原实现的代价是**耗尽状态彻底丢失**：
+// 账号被上游 429 之后 usableCount 仍恒为 1，路由把死站当健康站点，
+// 每个请求都要先撞一次 429，连「降级」也照着同一个错误前提挑目标。
+// 下面这组用例锁定「不落盘但状态可见」这个折中。
+describe('号池：兼容模式的内存态状态（不落盘但可见）', () => {
+  test('markExhausted 后 usableCount 归零，且不生成池文件', () => {
+    fresh();
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('L1')));
+    assert.equal(pool.usableCount('cn-cli'), 1);
+
+    pool.markExhausted('cn-cli', pool.DEFAULT_ACCOUNT_ID, '额度已用尽');
+
+    assert.equal(pool.usableCount('cn-cli'), 0, '耗尽后不应再算作可用');
+    assert.equal(pool.hasPoolFile('cn-cli'), false, '记录状态不应建出池文件');
+    const a = pool.getAccount('cn-cli', pool.DEFAULT_ACCOUNT_ID);
+    assert.equal(pool.isUsable(a), false);
+    assert.match(a.lastError, /额度已用尽/);
+  });
+
+  test('markFailure(429) 与 markExhausted 等效', () => {
+    fresh();
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('L2')));
+    pool.markFailure('cn-cli', pool.DEFAULT_ACCOUNT_ID, { status: 429, message: '使用量已超出频率限制' });
+    assert.equal(pool.usableCount('cn-cli'), 0);
+    assert.equal(pool.hasPoolFile('cn-cli'), false);
+    assert.ok(pool.getAccount('cn-cli', pool.DEFAULT_ACCOUNT_ID).exhaustedAt);
+  });
+
+  test('markFailure(500) 只冷却：非兜底挑不到，兜底仍能挑到', () => {
+    fresh();
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('L3')));
+    pool.markFailure('cn-cli', pool.DEFAULT_ACCOUNT_ID, { status: 500 });
+
+    assert.equal(pool.usableCount('cn-cli'), 0, '冷却中不算可用');
+    assert.equal(pool.pickAccount('cn-cli'), null);
+    // 兜底必须仍然返回账号：额度可能已重置，让上游给最终答案好过本地直接失败
+    assert.ok(pool.pickAccount('cn-cli', { fallback: true }), '兜底应仍能挑到冷却中的账号');
+    assert.equal(pool.usableCount('cn-cli'), 0, '挑到兜底账号不应把它变回可用');
+  });
+
+  test('markSuccess 解除耗尽标记（成功即证明额度可用）', () => {
+    fresh();
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('L4')));
+    pool.markExhausted('cn-cli', pool.DEFAULT_ACCOUNT_ID);
+    assert.equal(pool.usableCount('cn-cli'), 0);
+
+    pool.markSuccess('cn-cli', pool.DEFAULT_ACCOUNT_ID);
+
+    assert.equal(pool.usableCount('cn-cli'), 1);
+    assert.equal(pool.hasPoolFile('cn-cli'), false, '仍然不落盘');
+  });
+
+  test('换了凭证（重新登录）后旧状态自动失效，新号不被连坐', () => {
+    // 关键设计：覆盖层带 accessToken 指纹。少了它，用户重新登录拿到的新号
+    // 会继承上一个号的耗尽标记并被冻结 6 小时。
+    fresh();
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('old')));
+    pool.markExhausted('cn-cli', pool.DEFAULT_ACCOUNT_ID);
+    assert.equal(pool.usableCount('cn-cli'), 0);
+
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('new')));
+
+    assert.equal(pool.usableCount('cn-cli'), 1, '换了凭证就不该继承上一个号的耗尽标记');
+    assert.equal(pool.getAccount('cn-cli', pool.DEFAULT_ACCOUNT_ID).exhaustedAt, undefined);
+  });
+
+  test('迁移到池文件时耗尽状态随账号一起保留（不丢信息）', () => {
+    fresh();
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('L5')));
+    pool.markExhausted('cn-cli', pool.DEFAULT_ACCOUNT_ID, '配额用尽');
+
+    pool.addAccount('cn-cli', acct('L6'), { label: '新号' }); // 触发迁移
+
+    assert.equal(pool.hasPoolFile('cn-cli'), true);
+    const 旧号 = pool.getAccount('cn-cli', pool.DEFAULT_ACCOUNT_ID);
+    assert.ok(旧号.exhaustedAt, '内存态应随账户一起落进池文件');
+    assert.equal(旧号.lastError, '配额用尽');
+    assert.equal(pool.usableCount('cn-cli'), 1, '迁移后只剩新号可用');
+  });
+
+  test('clearLegacyState 清空内存态', () => {
+    fresh();
+    fs.writeFileSync(authPathFor('cn-cli'), JSON.stringify(acct('L7')));
+    pool.markExhausted('cn-cli', pool.DEFAULT_ACCOUNT_ID);
+    assert.equal(pool.usableCount('cn-cli'), 0);
+
+    pool.clearLegacyState();
+
+    assert.equal(pool.usableCount('cn-cli'), 1);
+  });
+
+  test('未登录时 mark* 不抛错，返回 null', () => {
+    fresh();
+    assert.equal(pool.markFailure('cn-cli', pool.DEFAULT_ACCOUNT_ID, { status: 429 }), null);
+    assert.equal(pool.markExhausted('cn-cli', pool.DEFAULT_ACCOUNT_ID), null);
+    assert.equal(pool.markSuccess('cn-cli', pool.DEFAULT_ACCOUNT_ID), null);
+    assert.equal(pool.hasPoolFile('cn-cli'), false);
   });
 });
 

@@ -48,6 +48,73 @@ const cache = new Map(); // `${dir}\0${site}` → { mtime, pool }
 
 const cacheKey = (site) => `${getConfigDir()}\u0000${site}`;
 
+/**
+ * 「旧单账号兼容视图」的内存态覆盖层。
+ *
+ * 背景：兼容模式下一个站点只有一个账号，没有可轮换的对象，所以 markFailure /
+ * markExhausted 刻意不落盘——否则控制台轮询这类只读场景会凭空建出池文件。
+ * 但副作用是**耗尽状态彻底丢失**：账号被上游 429 之后 usableCount 仍然恒为 1，
+ * 路由与降级选站都把它当成健康站点，于是每个请求都要先去撞一次 429，
+ * 甚至「降级」也照着同一个错误前提挑目标（实测会换到另一个同样耗尽的站点）。
+ *
+ * 这里把这类状态记在内存里：不写盘、不建池文件，但 isUsable / usableCount /
+ * pickAccount 都能看到，路由因此能避开已耗尽的单账号站点。
+ * 进程重启即失效——额度本来就可能已经重置，正好。
+ *
+ * 覆盖层里带凭证指纹：重新登录换了账号时旧状态自动失效，
+ * 否则新号会被上一个号的耗尽标记连坐 6 小时。
+ */
+const legacyState = new Map(); // `${dir}\0${site}` → { fp, patch }
+
+const legacyKey = (site) => `${getConfigDir()}\u0000${site}`;
+
+/** 凭证指纹：token 变了就说明账号换了。 */
+function credFingerprint(auth) {
+  return crypto
+    .createHash('sha1')
+    .update(String(auth?.accessToken || ''))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/** 读取某站点在兼容模式下的内存态覆盖；凭证已换则丢弃旧状态。 */
+function legacyPatch(site, auth) {
+  const hit = legacyState.get(legacyKey(site));
+  if (!hit) return null;
+  if (hit.fp !== credFingerprint(auth)) {
+    legacyState.delete(legacyKey(site));
+    return null;
+  }
+  return { ...hit.patch };
+}
+
+/** 写入内存态覆盖。 */
+function setLegacyPatch(site, auth, patch) {
+  legacyState.set(legacyKey(site), { fp: credFingerprint(auth), patch });
+}
+
+/**
+ * 清空所有内存态覆盖。供测试隔离使用；
+ * 生产路径不需要调用——换了凭证指纹会自动作废，迁移到池文件时会随账户一起落盘。
+ */
+export function clearLegacyState() {
+  legacyState.clear();
+}
+
+/**
+ * 在兼容模式下改账号状态：只改内存，绝不落盘。
+ * 语义与磁盘路径对齐：账号对不上（没登录 / id 不匹配）时返回 null。
+ */
+function mutateLegacy(site, id, fn) {
+  const legacy = readLegacyAuth(site);
+  if (!legacy) return null;
+  if (DEFAULT_ACCOUNT_ID !== id) return null;
+  const patch = legacyPatch(site, legacy.auth) || {};
+  fn(patch);
+  setLegacyPatch(site, legacy.auth, patch);
+  return patch;
+}
+
 function emptyPool() {
   return { version: 1, nextLabel: 1, accounts: [] };
 }
@@ -86,6 +153,9 @@ function writePool(site, pool) {
   const file = poolPathFor(site);
   fs.writeFileSync(file, JSON.stringify(pool, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
   cache.set(cacheKey(site), { mtime: fs.statSync(file).mtimeMs, pool });
+  // 状态已经落到池文件，内存态覆盖不再需要。
+  // 这里不会丢状态：调用方的 pool 来自 loadPool，而 loadPool 已经把覆盖合并进账户了。
+  legacyState.delete(legacyKey(site));
   return pool;
 }
 
@@ -115,10 +185,18 @@ export function loadPool(site) {
   const legacy = readLegacyAuth(site);
   if (!legacy) return emptyPool();
   // 不落盘：让只读场景（如控制台轮询）不产生写入副作用
-  return {
-    ...emptyPool(),
-    accounts: [{ ...legacy.auth, id: DEFAULT_ACCOUNT_ID, label: legacy.auth.nickname || '默认账号', enabled: true, legacyFile: legacy.file }],
+  const account = {
+    ...legacy.auth,
+    id: DEFAULT_ACCOUNT_ID,
+    label: legacy.auth.nickname || '默认账号',
+    enabled: true,
+    legacyFile: legacy.file,
   };
+  // 叠加内存态：兼容模式下的「额度耗尽 / 冷却」只存在内存里（见 legacyState 说明）。
+  // 少了这一步，单账号站点永远显示为可用，路由与降级选站就避不开已经死掉的站点。
+  const patch = legacyPatch(site, legacy.auth);
+  if (patch) Object.assign(account, patch);
+  return { ...emptyPool(), accounts: [account] };
 }
 
 /** 是否已经在用池文件（false 表示当前只是旧单账号的兼容视图）。 */
@@ -253,13 +331,41 @@ export function flushPool() {
 }
 
 /**
+ * 把「一次失败」应用到账号对象上。
+ * 磁盘池与兼容模式的内存态覆盖共用这一套规则，避免两处逻辑漂移。
+ */
+function applyFailure(a, { status = 0, message = '' } = {}) {
+  a.failCount = (a.failCount || 0) + 1;
+  a.lastError = String(message || status || '').slice(0, 200);
+  a.lastErrorAt = Date.now();
+  a.lastUsedAt = Date.now();
+  if (isQuotaError(status, message)) {
+    // 429/额度类：直接判定额度耗尽，长时间不再选它
+    a.exhaustedAt = Date.now();
+    a.cooldownUntil = null;
+  } else {
+    const step = COOLDOWN_STEPS_MS[Math.min(a.failCount, COOLDOWN_STEPS_MS.length - 1)];
+    a.cooldownUntil = step ? Date.now() + step : null;
+  }
+  return a;
+}
+
+/**
  * 记录一次成功：清掉失败计数与冷却，并解除「额度耗尽」标记。
  *
- * 兼容模式（还没有池文件）下直接返回：只有一个账号，没有可轮换的对象，
- * 记 lastUsedAt 没有意义，还会因为写盘而意外建出池文件。
+ * 兼容模式（还没有池文件）下改写内存态覆盖：不能落盘（否则会凭空建出池文件），
+ * 但「成功即证明额度可用」这条信息必须留下，否则一次误判的耗尽标记会一直挂到 TTL。
  */
 export function markSuccess(site, id) {
-  if (!hasPoolFile(site)) return null;
+  if (!hasPoolFile(site)) {
+    return mutateLegacy(site, id, (a) => {
+      a.failCount = 0;
+      a.cooldownUntil = null;
+      a.lastError = null;
+      if (a.exhaustedAt) a.exhaustedAt = null;
+      a.lastUsedAt = Date.now();
+    });
+  }
   return mutate(site, (pool) => {
     const a = pool.accounts.find((x) => x.id === id);
     if (!a) return null;
@@ -278,31 +384,30 @@ export function markSuccess(site, id) {
  *   - 429/额度类：直接判定额度耗尽，长时间不再选它
  *   - 401/403：凭证失效，需要重新登录
  *   - 5xx/网络：退避冷却，过一会儿还能用
+ *
+ * 兼容模式只有一个账号、没有可轮换的对象，也不必为它建池文件；
+ * 但状态仍要记进内存态覆盖——否则 usableCount 永远说「可用」，
+ * 路由就会一直把已经 429 的单账号站点当成健康站点（详见 legacyState 说明）。
  */
 export function markFailure(site, id, { status = 0, message = '' } = {}) {
-  // 兼容模式只有一个账号，没有可轮换的对象；也不必为它建池文件
-  if (!hasPoolFile(site)) return null;
+  if (!hasPoolFile(site)) return mutateLegacy(site, id, (a) => applyFailure(a, { status, message }));
   return mutate(site, (pool) => {
     const a = pool.accounts.find((x) => x.id === id);
     if (!a) return null;
-    a.failCount = (a.failCount || 0) + 1;
-    a.lastError = String(message || status || '').slice(0, 200);
-    a.lastErrorAt = Date.now();
-    a.lastUsedAt = Date.now();
-    if (isQuotaError(status, message)) {
-      a.exhaustedAt = Date.now();
-      a.cooldownUntil = null;
-    } else {
-      const step = COOLDOWN_STEPS_MS[Math.min(a.failCount, COOLDOWN_STEPS_MS.length - 1)];
-      a.cooldownUntil = step ? Date.now() + step : null;
-    }
-    return a;
+    return applyFailure(a, { status, message });
   });
 }
 
 /** 明确标记某账号额度耗尽（由额度查询/业务码驱动）。 */
 export function markExhausted(site, id, message = '额度不足') {
-  if (!hasPoolFile(site)) return null;
+  if (!hasPoolFile(site)) {
+    return mutateLegacy(site, id, (a) => {
+      a.exhaustedAt = Date.now();
+      a.cooldownUntil = null;
+      a.lastError = String(message).slice(0, 200);
+      a.lastErrorAt = Date.now();
+    });
+  }
   return mutate(site, (pool) => {
     const a = pool.accounts.find((x) => x.id === id);
     if (!a) return null;
