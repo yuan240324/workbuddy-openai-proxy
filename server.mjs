@@ -372,9 +372,21 @@ const server = http.createServer(async (req, res) => {
     );
   } catch (e) {
     const status = e.status || 500;
-    if (status >= 500) error(`${req.method} ${pathname} 处理失败：`, e.stack || e.message);
-    if (!res.headersSent) sendError(res, status, e.message || 'internal error');
-    else if (!res.writableEnded) res.end();
+    if (ac.signal.aborted) {
+      // 客户端已经断开，上游请求是被我们主动中止的 ——
+      // 上面 res.on('close') 里 abort 的原因就是「client closed」，
+      // 所以报错尾部的 client closed 不是上游的问题，是"没人等了"。
+      //
+      // 这既不是服务故障，也没人在等结果。之前按 status>=500 记成
+      // ERROR「处理失败」，会把人引向错误方向（看起来像程序坏了）。
+      // 客户端超时/取消时这条很常见，降级为 WARN 并写清真实原因。
+      warn(`${req.method} ${pathname} 客户端已断开，上游请求已中止（不是服务故障）`);
+    } else if (status >= 500) {
+      error(`${req.method} ${pathname} 处理失败：`, e.stack || e.message);
+    }
+    // 响应已断开就别再写了（对端已销毁，写入没有意义）
+    if (!res.headersSent && !res.writableEnded && !res.destroyed) sendError(res, status, e.message || 'internal error');
+    else if (!res.writableEnded && !res.destroyed) res.end();
   } finally {
     if (pathname !== '/health') {
       // 记录非健康检查请求的耗时（流式请求由各自 handler 记录明细）
