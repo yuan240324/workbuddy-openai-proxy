@@ -22,6 +22,18 @@ import { sendJson } from './util.mjs';
 
 const startedAt = Date.now();
 const loginStates = new Map(); // site → { state, authUrl, at }
+const creditCache = new Map(); // site → { credit, at }
+const CREDIT_CACHE_TTL = 15_000;
+
+async function getCachedCredit(cfg, site) {
+  const cached = creditCache.get(site);
+  if (cached && Date.now() - cached.at < CREDIT_CACHE_TTL) {
+    return cached.credit;
+  }
+  const credit = await queryCredit(cfg, site);
+  creditCache.set(site, { credit, at: Date.now() });
+  return credit;
+}
 
 /**
  * 从 package.json 读版本号。
@@ -109,23 +121,24 @@ export async function handleConsoleApi(ctx) {
 
   // ---- 状态总览 ----
   if (p === '/state' && method === 'GET') {
-    const sites = [];
-    for (const s of siteKeys(cfg)) {
-      const info = await siteSummary(cfg, s);
-      // 没有配置 billingBase 的站点不走计费接口，
-      // 跳过查询而不是报错，前端会显示「—」。
-      if (info.logged_in && supportsCreditQuery(cfg, s)) {
-        try {
-          const credit = await queryCredit(cfg, s);
-          info.credit = credit.remain;
-          info.credit_detail = credit.detail;
-          if (typeof credit.remain === 'number') recordBalance(s, credit.remain);
-        } catch (e) {
-          info.credit_error = e.message.slice(0, 160);
+    const sites = await Promise.all(
+      siteKeys(cfg).map(async (s) => {
+        const info = await siteSummary(cfg, s);
+        // 没有配置 billingBase 的站点不走计费接口，
+        // 跳过查询而不是报错，前端会显示「—」。
+        if (info.logged_in && supportsCreditQuery(cfg, s)) {
+          try {
+            const credit = await getCachedCredit(cfg, s);
+            info.credit = credit.remain;
+            info.credit_detail = credit.detail;
+            if (typeof credit.remain === 'number') recordBalance(s, credit.remain);
+          } catch (e) {
+            info.credit_error = e.message.slice(0, 160);
+          }
         }
-      }
-      sites.push(info);
-    }
+        return info;
+      })
+    );
     return sendJson(res, 200, {
       version: pkgVersion(),
       uptime_ms: Date.now() - startedAt,
