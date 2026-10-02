@@ -27,29 +27,32 @@ const learnedLimits = new Map();
  */
 const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]/;
 
-/** 按内容类型分别计权（贴近上面的实测值）。 */
+/** 按内容类型分别计权（贴近上面的实测值，纯数值区间比对避免逐字正则分配开销）。 */
 function tokenWeight(text) {
   const s = String(text);
   let cjk = 0;
   let digit = 0;
   let punct = 0;
   let word = 0;
-  for (const ch of s) {
-    if (CJK.test(ch)) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    // CJK 统一表意文字及扩展 + 中文标点 + 兼容表意 + 全半角（等价于原 CJK 正则）
+    if (
+      (c >= 0x4e00 && c <= 0x9fff) ||
+      (c >= 0x3400 && c <= 0x4dbf) ||
+      (c >= 0x3000 && c <= 0x303f) ||
+      (c >= 0xff00 && c <= 0xffef) ||
+      (c >= 0xf900 && c <= 0xfaff)
+    ) {
       cjk++;
-      continue;
+    } else if (c >= 48 && c <= 57) {
+      digit++;
+    } else if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 32 || (c >= 9 && c <= 13)) {
+      word++;
+    } else {
+      punct++;
     }
-    const c = ch.charCodeAt(0);
-    if (c >= 48 && c <= 57) digit++;
-    // 字母与空白：分词器会把连续的字母串合成较少的 token
-    else if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 32 || (c >= 9 && c <= 13)) word++;
-    // 其余（标点 / 符号 / 其他 Unicode）：分词器基本一个字符一个 token，权重明显更高
-    else punct++;
   }
-  // 标点权重 0.35 是实测反推的，不是拍脑袋：一个 360 万字符的 tools JSON
-  // （字母/空白 70%、标点 19.6%、数字 10.4%）本地估算 928,990，上游真实约 998,920，
-  // 低估 7.5%。按上面这个构成解方程，标点权重需要 0.349 —— 原来一律按 0.25 算，
-  // 恰恰把 JSON / 代码里最贵的部分估便宜了。
   return cjk * 0.55 + digit * 0.33 + word * 0.25 + punct * 0.35;
 }
 
@@ -271,14 +274,25 @@ export function fitMessages(messages, {
 
   // 2) 从最老的块开始丢，但至少给最近 minKeepMessages 条留位置
   const 保留条数 = (bs) => bs.reduce((n, b) => n + b.length, 0);
-  let 起点 = 0;
-  let 当前 = 系统块.concat(...blocks.map((b) => b));
-  while (起点 < blocks.length && estimateMessages(当前) > 预算) {
-    // 如果丢掉这一块会让剩余条数少于 minKeepMessages，就停下（先保住最近的对话）
-    if (保留条数(blocks.slice(起点)) <= minKeepMessages) break;
-    起点++;
-    当前 = 系统块.concat(...blocks.slice(起点));
+  let maxDrop = blocks.length;
+  while (maxDrop > 0 && 保留条数(blocks.slice(maxDrop)) < minKeepMessages) {
+    maxDrop--;
   }
+
+  // 二分查找满足 <= 预算的最小 起点（保留尽可能多的历史），避免在超长列表上反复 O(N) 线性全量估算
+  let 起点 = 0;
+  let l = 0, r = maxDrop;
+  while (l < r) {
+    const mid = (l + r) >> 1;
+    const msgs = 系统块.concat(...blocks.slice(mid));
+    if (estimateMessages(msgs) <= 预算) {
+      r = mid;
+    } else {
+      l = mid + 1;
+    }
+  }
+  起点 = l;
+  let 当前 = 系统块.concat(...blocks.slice(起点));
   stats.dropped = 起点 > 0 ? 保留条数(blocks.slice(0, 起点)) : 0;
 
   // 3) 还是超 → 从最新往回逐条截断内容（最新的最该保住，所以从最老的开始截）
