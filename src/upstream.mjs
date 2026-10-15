@@ -305,7 +305,8 @@ export async function openChat(cfg, site, body, { signal, exclude = [], accountI
     if (!res) break; // 连接失败，交给下面统一抛错
 
     // 只在「输入太长」且还有机会压缩时重试
-    if (res.status < 400 || 压缩重试次数 >= 最大压缩重试) break;
+    // 用户关掉上下文压缩（context.enabled=false）时，一律不做压缩重试，原样返回上游错误
+    if (res.status < 400 || 压缩重试次数 >= 最大压缩重试 || cfg.context?.enabled === false) break;
     const text = await res.text().catch(() => '');
     const 已知上限 = learnedLimit(site, model);
     // 工具定义不参与裁剪，但**要算进体积**：否则「messages 装得下」会被误当成
