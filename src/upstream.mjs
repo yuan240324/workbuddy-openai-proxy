@@ -39,6 +39,10 @@ import { warn } from './log.mjs';
  */
 const CLIENT_FINGERPRINTS = [
   /You are Claude Code,\s*Anthropic's official CLI for Claude\.?/i,
+  // Claude Code 2.1.x 起在 system 首块注入一行计费头，实测同样被判「非官方渠道」：
+  //   x-anthropic-billing-header: cc_version=2.1.303.914; cc_entrypoint=sdk-cli;
+  // 整行剥掉即可，后面的正式提示词不受影响。
+  /x-anthropic-billing-header:[^\n]*/gi,
 ];
 
 /**

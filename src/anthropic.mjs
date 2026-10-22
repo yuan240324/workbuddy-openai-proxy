@@ -305,7 +305,7 @@ export async function handleMessages(ctx) {
             await emit('content_block_delta', {
               type: 'content_block_delta',
               index: bi,
-              delta: { type: 'partial_json', partial_json: args },
+              delta: { type: 'input_json_delta', partial_json: args },
             });
           }
         }

@@ -21,6 +21,12 @@ export function chatHeaders(site, auth) {
   h.Authorization = 'Bearer ' + auth.accessToken;
   h['X-Request-ID'] = crypto.randomBytes(16).toString('hex');
   h['X-Request-Trace-Id'] = crypto.randomUUID();
+  // 2026-10 起上游在 /v2/chat/completions 上做「渠道校验」：三个 X-Conversation-* 会话头缺一
+  // 即返回 11128 request illegal（displayTips: 没通过渠道校验，可能不是官方客户端发出）。
+  // 这三个 id 只作渠道/会话标识，服务端不据此保存历史，每次请求现生成随机 UUID 即可。
+  h['X-Conversation-ID'] = crypto.randomUUID();
+  h['X-Conversation-Request-ID'] = crypto.randomUUID();
+  h['X-Conversation-Message-ID'] = crypto.randomUUID();
   h['X-Product'] = site.product || 'SaaS';
   if (auth.uid) h['X-User-Id'] = auth.uid;
   else h['X-No-User-Id'] = '1';
